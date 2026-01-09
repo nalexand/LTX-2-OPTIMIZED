@@ -244,8 +244,16 @@ def module_ops_from_gemma_root(gemma_root: str) -> tuple[ModuleOps, ...]:
     tokenizer_path = _find_matching_dir(gemma_root, "tokenizer.model")
 
     def load_gemma(module: GemmaTextEncoderModelBase) -> GemmaTextEncoderModelBase:
+        # Reserve 2GB VRAM for context window and activations
+        # Limit Gemma to 6GB, forcing more layers to CPU RAM
+        max_memory = {0: "6GiB", "cpu": "32GiB"}  # GPU 0: 6GB, CPU: 32GB
+        
         module.model = Gemma3ForConditionalGeneration.from_pretrained(
-            gemma_path, local_files_only=True, torch_dtype=torch.bfloat16
+            gemma_path, 
+            local_files_only=True, 
+            torch_dtype=torch.bfloat16,
+            device_map="auto",  # Enable sequential offloading
+            max_memory=max_memory  # Reserve 2GB VRAM for inference
         )
         module._gemma_root = module._gemma_root or gemma_root
         return module

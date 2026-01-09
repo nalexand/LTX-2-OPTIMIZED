@@ -218,7 +218,11 @@ class ModelLedger:
                 "ModelLedger constructor."
             )
 
-        return self.text_encoder_builder.build(device=self._target_device(), dtype=self.dtype).to(self.device).eval()
+        model = self.text_encoder_builder.build(device=self._target_device(), dtype=self.dtype)
+        # If the model has device mapping (from device_map="auto"), don't call .to() as it's already distributed
+        if hasattr(model, 'model') and hasattr(model.model, 'hf_device_map') and model.model.hf_device_map:
+            return model.eval()
+        return model.to(self.device).eval()
 
     def audio_decoder(self) -> AudioDecoder:
         if not hasattr(self, "audio_decoder_builder"):

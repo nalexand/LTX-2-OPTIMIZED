@@ -33,9 +33,14 @@ def get_device() -> torch.device:
 
 
 def cleanup_memory() -> None:
+    """Clean up GPU and system memory, including device-mapped models."""
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        # Second pass to ensure device-mapped tensors are released
+        gc.collect()
+        torch.cuda.empty_cache()
 
 
 def image_conditionings_by_replacing_latent(

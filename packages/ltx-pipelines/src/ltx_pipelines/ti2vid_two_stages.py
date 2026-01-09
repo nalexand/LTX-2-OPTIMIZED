@@ -111,6 +111,12 @@ class TI2VidTwoStagesPipeline:
         v_context_n, a_context_n = context_n
 
         torch.cuda.synchronize()
+        # For device-mapped models, need to explicitly remove hooks before deletion
+        if hasattr(text_encoder, 'model') and hasattr(text_encoder.model, 'hf_device_map'):
+            # Remove all hooks to fully release memory
+            from accelerate.hooks import remove_hook_from_module
+            remove_hook_from_module(text_encoder.model, recurse=True)
+            text_encoder.model = None
         del text_encoder
         cleanup_memory()
 
