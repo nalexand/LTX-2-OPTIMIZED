@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import Iterator
 
 import torch
@@ -35,6 +36,8 @@ from ltx_pipelines.utils.helpers import (
 from ltx_pipelines.utils.media_io import encode_video
 from ltx_pipelines.utils.types import PipelineComponents
 
+from line_profiler import profile
+
 device = get_device()
 
 
@@ -56,6 +59,8 @@ class TI2VidTwoStagesPipeline:
         device: str = device,
         fp8transformer: bool = False,
     ):
+        print("Start Init")
+        startAt = time.time()
         self.device = device
         self.dtype = torch.bfloat16
         self.stage_1_model_ledger = ModelLedger(
@@ -76,9 +81,10 @@ class TI2VidTwoStagesPipeline:
             dtype=self.dtype,
             device=device,
         )
+        print("End Init", time.time() - startAt)
 
     @torch.inference_mode()
-    def __call__(  # noqa: PLR0913
+    def old__call__(  # noqa: PLR0913
         self,
         prompt: str,
         negative_prompt: str,
@@ -93,6 +99,8 @@ class TI2VidTwoStagesPipeline:
         tiling_config: TilingConfig | None = None,
         enhance_prompt: bool = False,
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
+        print("Start Call")
+        startAt = time.time()
         assert_resolution(height=height, width=width, is_two_stage=True)
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -100,7 +108,7 @@ class TI2VidTwoStagesPipeline:
         stepper = EulerDiffusionStep()
         cfg_guider = CFGGuider(cfg_guidance_scale)
         dtype = torch.bfloat16
-
+        print("starting text encoder", time.time() - startAt)
         text_encoder = self.stage_1_model_ledger.text_encoder()
         if enhance_prompt:
             prompt = generate_enhanced_prompt(
@@ -109,17 +117,12 @@ class TI2VidTwoStagesPipeline:
         context_p, context_n = encode_text(text_encoder, prompts=[prompt, negative_prompt])
         v_context_p, a_context_p = context_p
         v_context_n, a_context_n = context_n
+        print("end text encoder", time.time() - startAt)
 
         torch.cuda.synchronize()
-        # For device-mapped models, need to explicitly remove hooks before deletion
-        if hasattr(text_encoder, 'model') and hasattr(text_encoder.model, 'hf_device_map'):
-            # Remove all hooks to fully release memory
-            from accelerate.hooks import remove_hook_from_module
-            remove_hook_from_module(text_encoder.model, recurse=True)
-            text_encoder.model = None
         del text_encoder
         cleanup_memory()
-
+        print("Stage 1: Initial low resolution video generation.", time.time() - startAt)
         # Stage 1: Initial low resolution video generation.
         video_encoder = self.stage_1_model_ledger.video_encoder()
         transformer = self.stage_1_model_ledger.transformer()
@@ -158,6 +161,7 @@ class TI2VidTwoStagesPipeline:
             dtype=dtype,
             device=self.device,
         )
+        print("Stage 1: Starting denoising loop.", time.time() - startAt)
         video_state, audio_state = denoise_audio_video(
             output_shape=stage_1_output_shape,
             conditionings=stage_1_conditionings,
@@ -169,17 +173,19 @@ class TI2VidTwoStagesPipeline:
             dtype=dtype,
             device=self.device,
         )
-
+        print("Stage 1: End denoising loop.", time.time() - startAt)
         torch.cuda.synchronize()
         del transformer
         cleanup_memory()
 
+        print("Stage 2: Upsample and refine the video at higher resolution with distilled LORA.", time.time() - startAt)
         # Stage 2: Upsample and refine the video at higher resolution with distilled LORA.
         upscaled_video_latent = upsample_video(
             latent=video_state.latent[:1],
             video_encoder=video_encoder,
             upsampler=self.stage_2_model_ledger.spatial_upsampler(),
         )
+        print("Stage 2: Upsample and refine the video end.", time.time() - startAt)
 
         torch.cuda.synchronize()
         cleanup_memory()
@@ -225,7 +231,7 @@ class TI2VidTwoStagesPipeline:
             initial_video_latent=upscaled_video_latent,
             initial_audio_latent=audio_state.latent,
         )
-
+        print("Stage 2: Upsample and refine the video end.", time.time() - startAt)
         torch.cuda.synchronize()
         del transformer
         del video_encoder
@@ -235,7 +241,219 @@ class TI2VidTwoStagesPipeline:
         decoded_audio = vae_decode_audio(
             audio_state.latent, self.stage_2_model_ledger.audio_decoder(), self.stage_2_model_ledger.vocoder()
         )
+        print("Stage 2:vae decode video end.", time.time() - startAt)
+        return decoded_video, decoded_audio
 
+    @torch.inference_mode()
+    def __call__(  # noqa: PLR0913
+            self,
+            prompt: str,
+            negative_prompt: str,
+            seed: int,
+            height: int,
+            width: int,
+            num_frames: int,
+            frame_rate: float,
+            num_inference_steps: int,
+            cfg_guidance_scale: float,
+            images: list[tuple[str, int, float]],
+            tiling_config: TilingConfig | None = None,
+            enhance_prompt: bool = False,
+    ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
+        import hashlib
+        import os
+
+        print("Start Call")
+        startAt = time.time()
+        assert_resolution(height=height, width=width, is_two_stage=True)
+
+        generator = torch.Generator(device=self.device).manual_seed(seed)
+        noiser = GaussianNoiser(generator=generator)
+        stepper = EulerDiffusionStep()
+        cfg_guider = CFGGuider(cfg_guidance_scale)
+        dtype = torch.bfloat16
+        print("starting text encoder", time.time() - startAt)
+
+        # --- DISK CACHE LOGIC START ---
+        CACHE_DIR = "./prompt_embeddings_cache"
+        os.makedirs(CACHE_DIR, exist_ok=True)
+
+        # 1. Create a unique hash string based on inputs that affect text encoding
+        # Note: We only include seed and image if enhance_prompt is True,
+        # because otherwise, they don't change the text embedding.
+        image_identifier = images[0][0] if (len(images) > 0 and enhance_prompt) else "no_img"
+
+        hash_input_str = (
+            f"prompt:{prompt}|"
+            f"neg:{negative_prompt}|"
+            f"enhance:{enhance_prompt}|"
+            f"seed:{seed if enhance_prompt else 'ignored'}|"
+            f"img:{image_identifier}"
+        )
+
+        # Create MD5 hash for filename
+        cache_filename = hashlib.md5(hash_input_str.encode('utf-8')).hexdigest() + ".pt"
+        cache_path = os.path.join(CACHE_DIR, cache_filename)
+
+        context_p = None
+        context_n = None
+
+        if os.path.exists(cache_path):
+            print(f"Disk cache hit! Loading embeddings from {cache_path}")
+            # Load directly to the correct device
+            try:
+                cached_data = torch.load(cache_path, map_location=self.device)
+                context_p, context_n = cached_data
+            except Exception as e:
+                print(f"Failed to load cache (corrupted?): {e}. Regenerating.")
+
+        # If cache miss or load failed
+        if context_p is None:
+            print("Disk cache miss. Running text encoder.")
+            text_encoder = self.stage_1_model_ledger.text_encoder()
+
+            # Logic to handle prompt enhancement
+            current_prompt = prompt
+            if enhance_prompt:
+                current_prompt = generate_enhanced_prompt(
+                    text_encoder, prompt, images[0][0] if len(images) > 0 else None, seed=seed
+                )
+
+            context_p, context_n = encode_text(text_encoder, prompts=[current_prompt, negative_prompt])
+
+            # Save to disk for next time
+            print(f"Saving embeddings to {cache_path}")
+            torch.save((context_p, context_n), cache_path)
+
+            torch.cuda.synchronize()
+            del text_encoder
+            cleanup_memory()
+        # --- DISK CACHE LOGIC END ---
+
+        v_context_p, a_context_p = context_p
+        v_context_n, a_context_n = context_n
+        print("end text encoder", time.time() - startAt)
+
+        print("Stage 1: Initial low resolution video generation.", time.time() - startAt)
+        # Stage 1: Initial low resolution video generation.
+        video_encoder = self.stage_1_model_ledger.video_encoder()
+        transformer = self.stage_1_model_ledger.transformer()
+        sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=self.device)
+
+        def first_stage_denoising_loop(
+                sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+        ) -> tuple[LatentState, LatentState]:
+            return euler_denoising_loop(
+                sigmas=sigmas,
+                video_state=video_state,
+                audio_state=audio_state,
+                stepper=stepper,
+                denoise_fn=guider_denoising_func(
+                    cfg_guider,
+                    v_context_p,
+                    v_context_n,
+                    a_context_p,
+                    a_context_n,
+                    transformer=transformer,  # noqa: F821
+                ),
+            )
+
+        stage_1_output_shape = VideoPixelShape(
+            batch=1,
+            frames=num_frames,
+            width=width // 2,
+            height=height // 2,
+            fps=frame_rate,
+        )
+        stage_1_conditionings = image_conditionings_by_replacing_latent(
+            images=images,
+            height=stage_1_output_shape.height,
+            width=stage_1_output_shape.width,
+            video_encoder=video_encoder,
+            dtype=dtype,
+            device=self.device,
+        )
+        print("Stage 1: Starting denoising loop.", time.time() - startAt)
+        video_state, audio_state = denoise_audio_video(
+            output_shape=stage_1_output_shape,
+            conditionings=stage_1_conditionings,
+            noiser=noiser,
+            sigmas=sigmas,
+            stepper=stepper,
+            denoising_loop_fn=first_stage_denoising_loop,
+            components=self.pipeline_components,
+            dtype=dtype,
+            device=self.device,
+        )
+        print("Stage 1: End denoising loop.", time.time() - startAt)
+        #torch.cuda.synchronize()
+        del transformer
+        cleanup_memory()
+
+        print("Stage 2: Upsample and refine the video at higher resolution with distilled LORA.", time.time() - startAt)
+        # Stage 2: Upsample and refine the video at higher resolution with distilled LORA.
+        upscaled_video_latent = upsample_video(
+            latent=video_state.latent[:1],
+            video_encoder=video_encoder,
+            upsampler=self.stage_2_model_ledger.spatial_upsampler(),
+        )
+        print("Stage 2: Upsample and refine the video end.", time.time() - startAt)
+
+        #torch.cuda.synchronize()
+        cleanup_memory()
+
+        transformer = self.stage_2_model_ledger.transformer()
+        distilled_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(self.device)
+
+        def second_stage_denoising_loop(
+                sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+        ) -> tuple[LatentState, LatentState]:
+            return euler_denoising_loop(
+                sigmas=sigmas,
+                video_state=video_state,
+                audio_state=audio_state,
+                stepper=stepper,
+                denoise_fn=simple_denoising_func(
+                    video_context=v_context_p,
+                    audio_context=a_context_p,
+                    transformer=transformer,  # noqa: F821
+                ),
+            )
+
+        stage_2_output_shape = VideoPixelShape(batch=1, frames=num_frames, width=width, height=height, fps=frame_rate)
+        stage_2_conditionings = image_conditionings_by_replacing_latent(
+            images=images,
+            height=stage_2_output_shape.height,
+            width=stage_2_output_shape.width,
+            video_encoder=video_encoder,
+            dtype=dtype,
+            device=self.device,
+        )
+        video_state, audio_state = denoise_audio_video(
+            output_shape=stage_2_output_shape,
+            conditionings=stage_2_conditionings,
+            noiser=noiser,
+            sigmas=distilled_sigmas,
+            stepper=stepper,
+            denoising_loop_fn=second_stage_denoising_loop,
+            components=self.pipeline_components,
+            dtype=dtype,
+            device=self.device,
+            noise_scale=distilled_sigmas[0],
+            initial_video_latent=upscaled_video_latent,
+            initial_audio_latent=audio_state.latent,
+        )
+        print("Stage 2: Upsample and refine the video end.", time.time() - startAt)
+        #torch.cuda.synchronize()
+        del transformer
+        del video_encoder
+        cleanup_memory()
+
+        decoded_video = vae_decode_video(video_state.latent, self.stage_2_model_ledger.video_decoder(), tiling_config)
+        decoded_audio = vae_decode_audio(
+            audio_state.latent, self.stage_2_model_ledger.audio_decoder(), self.stage_2_model_ledger.vocoder()
+        )
+        print("Stage 2:vae decode video end.", time.time() - startAt)
         return decoded_video, decoded_audio
 
 

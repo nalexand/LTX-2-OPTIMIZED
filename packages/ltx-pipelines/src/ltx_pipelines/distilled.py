@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import Iterator
 
 import torch
@@ -70,42 +71,103 @@ class DistilledPipeline:
             device=device,
         )
 
+    @torch.inference_mode()
+    #@profile
     def __call__(
-        self,
-        prompt: str,
-        seed: int,
-        height: int,
-        width: int,
-        num_frames: int,
-        frame_rate: float,
-        images: list[tuple[str, int, float]],
-        tiling_config: TilingConfig | None = None,
-        enhance_prompt: bool = False,
+            self,
+            prompt: str,
+            seed: int,
+            height: int,
+            width: int,
+            num_frames: int,
+            frame_rate: float,
+            images: list[tuple[str, int, float]],
+            tiling_config: TilingConfig | None = None,
+            enhance_prompt: bool = False,
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
+        import hashlib
+        import os
+
+        print("Start Call")
+        startAt = time.time()
         assert_resolution(height=height, width=width, is_two_stage=True)
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
         noiser = GaussianNoiser(generator=generator)
         stepper = EulerDiffusionStep()
         dtype = torch.bfloat16
+        print("starting text encoder", time.time() - startAt)
 
-        text_encoder = self.model_ledger.text_encoder()
-        if enhance_prompt:
-            prompt = generate_enhanced_prompt(text_encoder, prompt, images[0][0] if len(images) > 0 else None)
-        context_p = encode_text(text_encoder, prompts=[prompt])[0]
+        # --- DISK CACHE LOGIC START ---
+        CACHE_DIR = "./prompt_embeddings_cache"
+        os.makedirs(CACHE_DIR, exist_ok=True)
+
+        # 1. Create a unique hash string based on inputs that affect text encoding
+        # Distilled pipeline usually doesn't use negative prompts, so we exclude it from the hash
+        image_identifier = images[0][0] if (len(images) > 0 and enhance_prompt) else "no_img"
+
+        hash_input_str = (
+            f"prompt:{prompt}|"
+            f"pipeline:distilled|"  # Differentiates from standard t2v if they share a folder
+            f"enhance:{enhance_prompt}|"
+            f"seed:{seed if enhance_prompt else 'ignored'}|"
+            f"img:{image_identifier}"
+        )
+
+        # Create MD5 hash for filename
+        cache_filename = hashlib.md5(hash_input_str.encode('utf-8')).hexdigest() + ".pt"
+        cache_path = os.path.join(CACHE_DIR, cache_filename)
+
+        context_p = None
+
+        if os.path.exists(cache_path):
+            print(f"Disk cache hit! Loading embeddings from {cache_path}")
+            try:
+                # Load directly to the correct device
+                # For distilled, we only saved context_p
+                context_p = torch.load(cache_path, map_location=self.device)
+            except Exception as e:
+                print(f"Failed to load cache (corrupted?): {e}. Regenerating.")
+
+        # If cache miss or load failed
+        if context_p is None:
+            print("Disk cache miss. Running text encoder.")
+            text_encoder = self.model_ledger.text_encoder()
+
+            # Logic to handle prompt enhancement
+            current_prompt = prompt
+            if enhance_prompt:
+                current_prompt = generate_enhanced_prompt(
+                    text_encoder, prompt, images[0][0] if len(images) > 0 else None
+                )
+
+            # In distilled pipeline, we usually only take the first element (positive)
+            # and there is no negative context generated
+            context_p = encode_text(text_encoder, prompts=[current_prompt])[0]
+
+            # Save to disk for next time
+            print(f"Saving embeddings to {cache_path}")
+            torch.save(context_p, cache_path)
+
+            torch.cuda.synchronize()
+            del text_encoder
+            cleanup_memory()
+        # --- DISK CACHE LOGIC END ---
+
+        # Unpack the positive context (Distilled usually splits this into video/audio context)
         video_context, audio_context = context_p
 
-        torch.cuda.synchronize()
-        del text_encoder
-        cleanup_memory()
+        print("end text encoder", time.time() - startAt)
 
+        print("Stage 1: Initial low resolution video generation.", time.time() - startAt)
         # Stage 1: Initial low resolution video generation.
         video_encoder = self.model_ledger.video_encoder()
         transformer = self.model_ledger.transformer()
+
         stage_1_sigmas = torch.Tensor(DISTILLED_SIGMA_VALUES).to(self.device)
 
         def denoising_loop(
-            sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+                sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
         ) -> tuple[LatentState, LatentState]:
             return euler_denoising_loop(
                 sigmas=sigmas,
@@ -134,7 +196,7 @@ class DistilledPipeline:
             dtype=dtype,
             device=self.device,
         )
-
+        print("Stage 1: Starting denoising loop.", time.time() - startAt)
         video_state, audio_state = denoise_audio_video(
             output_shape=stage_1_output_shape,
             conditionings=stage_1_conditionings,
@@ -146,11 +208,14 @@ class DistilledPipeline:
             dtype=dtype,
             device=self.device,
         )
+        print("Stage 1: End denoising loop.", time.time() - startAt)
 
+        print("Stage 2: Upsample and refine the video at higher resolution with distilled LORA.", time.time() - startAt)
         # Stage 2: Upsample and refine the video at higher resolution with distilled LORA.
         upscaled_video_latent = upsample_video(
             latent=video_state.latent[:1], video_encoder=video_encoder, upsampler=self.model_ledger.spatial_upsampler()
         )
+        print("Stage 2: Upsample and refine the video end.", time.time() - startAt)
 
         torch.cuda.synchronize()
         cleanup_memory()
@@ -179,7 +244,7 @@ class DistilledPipeline:
             initial_video_latent=upscaled_video_latent,
             initial_audio_latent=audio_state.latent,
         )
-
+        print("Stage 2: Upsample and refine the video end.", time.time() - startAt)
         torch.cuda.synchronize()
         del transformer
         del video_encoder
@@ -189,6 +254,7 @@ class DistilledPipeline:
         decoded_audio = vae_decode_audio(
             audio_state.latent, self.model_ledger.audio_decoder(), self.model_ledger.vocoder()
         )
+        print("Stage 2:vae decode video end.", time.time() - startAt)
         return decoded_video, decoded_audio
 
 

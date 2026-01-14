@@ -33,14 +33,9 @@ def get_device() -> torch.device:
 
 
 def cleanup_memory() -> None:
-    """Clean up GPU and system memory, including device-mapped models."""
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-        # Second pass to ensure device-mapped tensors are released
-        gc.collect()
-        torch.cuda.empty_cache()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
 
 def image_conditionings_by_replacing_latent(
@@ -95,7 +90,7 @@ def image_conditionings_by_adding_guiding_latent(
         )
     return conditionings
 
-
+#@profile 293.788 s
 def euler_denoising_loop(
     sigmas: torch.Tensor,
     video_state: LatentState,
@@ -135,7 +130,7 @@ def euler_denoising_loop(
         audio latent states after completing the denoising loop.
     """
     for step_idx, _ in enumerate(tqdm(sigmas[:-1])):
-        denoised_video, denoised_audio = denoise_fn(video_state, audio_state, sigmas, step_idx)
+        denoised_video, denoised_audio = denoise_fn(video_state, audio_state, sigmas, step_idx)  # 100%
 
         denoised_video = post_process_latent(denoised_video, video_state.denoise_mask, video_state.clean_latent)
         denoised_audio = post_process_latent(denoised_audio, audio_state.denoise_mask, audio_state.clean_latent)
@@ -145,7 +140,7 @@ def euler_denoising_loop(
 
     return (video_state, audio_state)
 
-
+#@profile unused
 def gradient_estimating_euler_denoising_loop(
     sigmas: torch.Tensor,
     video_state: LatentState,
@@ -205,7 +200,7 @@ def gradient_estimating_euler_denoising_loop(
 
     return (video_state, audio_state)
 
-
+#@profile 0.13212 s
 def noise_video_state(
     output_shape: VideoPixelShape,
     noiser: Noiser,
@@ -228,7 +223,7 @@ def noise_video_state(
         scale_factors=components.video_scale_factors,
     )
     video_tools = VideoLatentTools(components.video_patchifier, video_latent_shape, output_shape.fps)
-    video_state = create_noised_state(
+    video_state = create_noised_state(  # 99.9%
         tools=video_tools,
         conditionings=conditionings,
         noiser=noiser,
@@ -240,7 +235,7 @@ def noise_video_state(
 
     return video_state, video_tools
 
-
+#@profile 0.0061205 s
 def noise_audio_state(
     output_shape: VideoPixelShape,
     noiser: Noiser,
@@ -271,7 +266,7 @@ def noise_audio_state(
 
     return audio_state, audio_tools
 
-
+#@profile 0.138001 s
 def create_noised_state(
     tools: LatentTools,
     conditionings: list[ConditioningItem],
@@ -285,13 +280,13 @@ def create_noised_state(
     Creates an empty latent state, applies conditionings, and then adds noise
     using the provided noiser. Returns the final noised state ready for diffusion.
     """
-    state = tools.create_initial_state(device, dtype, initial_latent)
+    state = tools.create_initial_state(device, dtype, initial_latent)  # 92.1%
     state = state_with_conditionings(state, conditionings, tools)
     state = noiser(state, noise_scale)
 
     return state
 
-
+#@profile 8.7e-06 s
 def state_with_conditionings(
     latent_state: LatentState, conditioning_items: list[ConditioningItem], latent_tools: LatentTools
 ) -> LatentState:
@@ -304,12 +299,12 @@ def state_with_conditionings(
 
     return latent_state
 
-
+#@profile 0.0054349 s
 def post_process_latent(denoised: torch.Tensor, denoise_mask: torch.Tensor, clean: torch.Tensor) -> torch.Tensor:
     """Blend denoised output with clean state based on mask."""
     return (denoised * denoise_mask + clean.float() * (1 - denoise_mask)).to(denoised.dtype)
 
-
+#@profile 0.0025289 s
 def modality_from_latent_state(
     state: LatentState, context: torch.Tensor, sigma: float | torch.Tensor, enabled: bool = True
 ) -> Modality:
@@ -326,7 +321,7 @@ def modality_from_latent_state(
         context_mask=None,
     )
 
-
+#@profile 0.0011484 s
 def timesteps_from_mask(denoise_mask: torch.Tensor, sigma: float | torch.Tensor) -> torch.Tensor:
     """Compute timesteps from a denoise mask and sigma value.
     Multiplies the denoise mask by sigma to produce timesteps for each position
@@ -334,7 +329,7 @@ def timesteps_from_mask(denoise_mask: torch.Tensor, sigma: float | torch.Tensor)
     """
     return denoise_mask * sigma
 
-
+#@profile
 def simple_denoising_func(
     video_context: torch.Tensor, audio_context: torch.Tensor, transformer: X0Model
 ) -> DenoisingFunc:
@@ -345,12 +340,12 @@ def simple_denoising_func(
         pos_video = modality_from_latent_state(video_state, video_context, sigma)
         pos_audio = modality_from_latent_state(audio_state, audio_context, sigma)
 
-        denoised_video, denoised_audio = transformer(video=pos_video, audio=pos_audio, perturbations=None)
+        denoised_video, denoised_audio = transformer(video=pos_video, audio=pos_audio, perturbations=None)  # 100%
         return denoised_video, denoised_audio
 
     return simple_denoising_step
 
-
+#@profile unused
 def guider_denoising_func(
     guider: GuiderProtocol,
     v_context_p: torch.Tensor,
@@ -380,7 +375,7 @@ def guider_denoising_func(
 
     return guider_denoising_step
 
-
+#@profile 293.957 s
 def denoise_audio_video(  # noqa: PLR0913
     output_shape: VideoPixelShape,
     conditionings: list[ConditioningItem],
@@ -416,7 +411,7 @@ def denoise_audio_video(  # noqa: PLR0913
         initial_latent=initial_audio_latent,
     )
 
-    video_state, audio_state = denoising_loop_fn(
+    video_state, audio_state = denoising_loop_fn(  # 99.9%
         sigmas,
         video_state,
         audio_state,
