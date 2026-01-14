@@ -1,8 +1,6 @@
 import torch
 
-from line_profiler import profile
 
-@profile
 def fused_add_round_kernel(
         x: torch.Tensor,
         output: torch.Tensor,

@@ -6,9 +6,7 @@ from ltx_core.loader.primitives import LoraStateDictWithStrength, StateDict
 
 BLOCK_SIZE = 1024
 
-from line_profiler import profile
 
-@profile
 def fused_add_round_launch(target_weight: torch.Tensor, original_weight: torch.Tensor, seed: int) -> torch.Tensor:
     """
     Native PyTorch implementation of fused_add_round_launch.

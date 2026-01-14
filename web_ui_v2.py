@@ -119,7 +119,8 @@ def run_generation(
     ]
     for path, idx, strength in images:
         if path is not None:
-            cmd.extend(["--image", path, str(int(idx)), str(float(strength))])
+            latent_idx = int(idx) // 8
+            cmd.extend(["--image", path, str(latent_idx), str(float(strength))])
 
     # LoRAs
     for lora_name in selected_loras:
