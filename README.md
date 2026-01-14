@@ -1,4 +1,75 @@
-# LTX-2
+# LTX-2 Optimized (8GB VRAM Edition) + Web UI
+
+This repository contains a **modified and optimized version of the LTX-2 Video Generation Model**, designed specifically to run on consumer hardware with as little as **8GB VRAM**. 
+
+It includes a fully-featured **Gradio Web Interface** to make generating videos, managing presets, and applying LoRAs easy without needing to remember complex command-line arguments.
+
+
+## 🚀 Features
+
+*   **8GB VRAM Optimization:** Runs locally on cards like the RTX 3070/4060Ti using FP8 quantization and memory management tweaks.
+*   **Windows 11 support!!!** You can even run it on Windows (not supported in original model).
+*   **User-Friendly Web UI:** Control everything from your browser.
+*   **Smart "Safe Mode":** The UI automatically limits the frame count based on selected resolution to prevent Out-Of-Memory (OOM) errors.
+*   **Real-time Logging:** View the generation progress and console output directly in the web interface.
+*   **Advanced Features:**
+    *   **Image Conditioning:** Upload reference images.
+    *   **LoRA Support:** Checkbox selection for Camera Control.
+    *   **Seed Control:** Reproducible generations.
+
+## 📥 Model Download & Setup
+
+To run this, you need to download the specific FP8 distilled checkpoints and the Text Encoder.
+
+**1. Create a `models` directory in the root folder:**
+```bash
+mkdir models
+mkdir models/loras
+```
+
+**2. Download the models:**
+* You can find the compatible models via the links provided in the original optimized repository or the Lightricks HuggingFace page.
+```
+./models/
+    ltx-2-19b-distilled-fp8.safetensors	
+    ltx-2-spatial-upscaler-x2-1.0.safetensors
+
+./models/gemma3/
+    gemma-3 files
+
+./models/loras/
+    loras
+```
+**3. Install all required modules:**
+```
+required modules
+pip install -e packages/ltx-pipelines
+pip install -e packages/ltx-core
+
+Python 3.12.8
+accelerate==1.10.1
+torch==2.8.0+cu128
+torchaudio==2.8.0+cu128
+torchvision==0.23.0+cu128
+xformers==0.0.32.post2
+...
+```
+**🖥️ Usage**
+Run the web interface with a single command:
+```Bash
+python web_ui_v2.py
+```
+
+##Credits
+* Original Model: Lightricks (LTX-2)
+* Optimization: nalexand
+* Web UI: Created for the community to make this powerful model accessible.
+
+Original Model: 
+* (you can find links to all model files and loras bellow)
+
+
+## LTX-2
 
 [![Website](https://img.shields.io/badge/Website-LTX-181717?logo=google-chrome)](https://ltx.io)
 [![Model](https://img.shields.io/badge/HuggingFace-Model-orange?logo=huggingface)](https://huggingface.co/Lightricks/LTX-2)

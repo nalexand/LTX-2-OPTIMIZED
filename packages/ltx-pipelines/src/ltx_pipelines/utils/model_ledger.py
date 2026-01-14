@@ -177,6 +177,7 @@ class ModelLedger:
         )
 
     def transformer(self) -> X0Model:
+        offload_config = {0: "0.5GiB", "cpu": "32GiB"}
         if not hasattr(self, "transformer_builder"):
             raise ValueError(
                 "Transformer not initialized. Please provide a checkpoint path to the ModelLedger constructor."
@@ -187,12 +188,11 @@ class ModelLedger:
                 module_ops=(UPCAST_DURING_INFERENCE,),
                 model_sd_ops=LTXV_MODEL_COMFY_RENAMING_WITH_TRANSFORMER_LINEAR_DOWNCAST_MAP,
             )
-            return X0Model(fp8_builder.build(device=self._target_device())).to(self.device).eval()
+            return X0Model(fp8_builder.build(device=self._target_device(), max_memory=offload_config))  # .to(self.device).eval()
         else:
             return (
-                X0Model(self.transformer_builder.build(device=self._target_device(), dtype=self.dtype))
-                .to(self.device)
-                .eval()
+                X0Model(self.transformer_builder.build(device=self._target_device(), dtype=self.dtype, max_memory=offload_config))
+                #.to(self.device).eval()
             )
 
     def video_decoder(self) -> VideoDecoder:
@@ -218,7 +218,7 @@ class ModelLedger:
                 "ModelLedger constructor."
             )
 
-        return self.text_encoder_builder.build(device=self._target_device(), dtype=self.dtype).to(self.device).eval()
+        return self.text_encoder_builder.build(device=self._target_device(), dtype=self.dtype)   # .to(self.device).eval()
 
     def audio_decoder(self) -> AudioDecoder:
         if not hasattr(self, "audio_decoder_builder"):
@@ -239,5 +239,5 @@ class ModelLedger:
     def spatial_upsampler(self) -> LatentUpsampler:
         if not hasattr(self, "upsampler_builder"):
             raise ValueError("Upsampler not initialized. Please provide upsampler path to the ModelLedger constructor.")
-
-        return self.upsampler_builder.build(device=self._target_device(), dtype=self.dtype).to(self.device).eval()
+        offload_config = {0: "0.1GiB", "cpu": "32GiB"}
+        return self.upsampler_builder.build(device=self._target_device(), dtype=self.dtype, max_memory=offload_config)  # .to(self.device).eval()

@@ -16,6 +16,8 @@ from ltx_core.model.transformer.transformer_args import (
 )
 from ltx_core.utils import to_denoised
 
+#from line_profiler import profile
+
 
 class LTXModelType(Enum):
     AudioVideo = "ltx av model"
@@ -35,6 +37,7 @@ class LTXModel(torch.nn.Module):
     This class implements the transformer blocks for the LTX model.
     """
 
+    #@profile 1.37738 s
     def __init__(  # noqa: PLR0913
         self,
         *,
@@ -105,7 +108,7 @@ class LTXModel(torch.nn.Module):
 
         self._init_preprocessors(cross_pe_max_pos)
         # Initialize transformer blocks
-        self._init_transformer_blocks(
+        self._init_transformer_blocks(  # 98.2%
             num_layers=num_layers,
             attention_head_dim=attention_head_dim if model_type.is_video_enabled() else 0,
             cross_attention_dim=cross_attention_dim,
@@ -115,6 +118,7 @@ class LTXModel(torch.nn.Module):
             attention_type=attention_type,
         )
 
+    #@profile 0.0069204 s
     def _init_video(
         self,
         in_channels: int,
@@ -139,6 +143,7 @@ class LTXModel(torch.nn.Module):
         self.norm_out = torch.nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=norm_eps)
         self.proj_out = torch.nn.Linear(self.inner_dim, out_channels)
 
+    #@profile 0.0063044 s
     def _init_audio(
         self,
         in_channels: int,
@@ -166,6 +171,7 @@ class LTXModel(torch.nn.Module):
         self.audio_norm_out = torch.nn.LayerNorm(self.audio_inner_dim, elementwise_affine=False, eps=norm_eps)
         self.audio_proj_out = torch.nn.Linear(self.audio_inner_dim, out_channels)
 
+    #@profile 0.0111731 s
     def _init_audio_video(
         self,
         num_scale_shift_values: int,
@@ -191,6 +197,7 @@ class LTXModel(torch.nn.Module):
             embedding_coefficient=1,
         )
 
+    #@profile 0.0002355 s
     def _init_preprocessors(
         self,
         cross_pe_max_pos: int | None = None,
@@ -263,6 +270,7 @@ class LTXModel(torch.nn.Module):
                 rope_type=self.rope_type,
             )
 
+    #@profile 1.3519 s
     def _init_transformer_blocks(
         self,
         num_layers: int,
@@ -296,7 +304,7 @@ class LTXModel(torch.nn.Module):
         )
         self.transformer_blocks = torch.nn.ModuleList(
             [
-                BasicAVTransformerBlock(
+                BasicAVTransformerBlock(  # 99.9%
                     idx=idx,
                     video=video_config,
                     audio=audio_config,
@@ -308,6 +316,7 @@ class LTXModel(torch.nn.Module):
             ]
         )
 
+    #@profile unused
     def set_gradient_checkpointing(self, enable: bool) -> None:
         """Enable or disable gradient checkpointing for transformer blocks.
         Gradient checkpointing trades compute for memory by recomputing activations
@@ -318,6 +327,7 @@ class LTXModel(torch.nn.Module):
         """
         self._enable_gradient_checkpointing = enable
 
+    #@profile 498.557 s
     def _process_transformer_blocks(
         self,
         video: TransformerArgs | None,
@@ -340,7 +350,7 @@ class LTXModel(torch.nn.Module):
                     use_reentrant=False,
                 )
             else:
-                video, audio = block(
+                video, audio = block(  # 100%
                     video=video,
                     audio=audio,
                     perturbations=perturbations,
@@ -348,6 +358,7 @@ class LTXModel(torch.nn.Module):
 
         return video, audio
 
+    #@profile 0.0648487 s
     def _process_output(
         self,
         scale_shift_table: torch.Tensor,
@@ -368,6 +379,7 @@ class LTXModel(torch.nn.Module):
         x = proj_out(x)
         return x
 
+    #@profile 502.847 s
     def forward(
         self, video: Modality | None, audio: Modality | None, perturbations: BatchedPerturbationConfig
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -384,7 +396,7 @@ class LTXModel(torch.nn.Module):
         video_args = self.video_args_preprocessor.prepare(video) if video is not None else None
         audio_args = self.audio_args_preprocessor.prepare(audio) if audio is not None else None
         # Process transformer blocks
-        video_out, audio_out = self._process_transformer_blocks(
+        video_out, audio_out = self._process_transformer_blocks(  # 99.1%
             video=video_args,
             audio=audio_args,
             perturbations=perturbations,
@@ -450,7 +462,7 @@ class X0Model(torch.nn.Module):
     def __init__(self, velocity_model: LTXModel):
         super().__init__()
         self.velocity_model = velocity_model
-
+    #@profile 502.854 s
     def forward(
         self,
         video: Modality | None,
@@ -462,7 +474,7 @@ class X0Model(torch.nn.Module):
         Returns:
             Denoised video and audio
         """
-        vx, ax = self.velocity_model(video, audio, perturbations)
+        vx, ax = self.velocity_model(video, audio, perturbations)  # 100%
         denoised_video = to_denoised(video.latent, vx, video.timesteps) if vx is not None else None
         denoised_audio = to_denoised(audio.latent, ax, audio.timesteps) if ax is not None else None
         return denoised_video, denoised_audio

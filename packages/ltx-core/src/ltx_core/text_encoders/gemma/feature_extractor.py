@@ -19,7 +19,7 @@ class GemmaFeaturesExtractorProjLinear(torch.nn.Module, ModelConfigurator["Gemma
         The input dimension is expected to be 3840 * 49, and the output is 3840.
         """
         super().__init__()
-        self.aggregate_embed = torch.nn.Linear(3840 * 49, 3840, bias=False)
+        self.aggregate_embed = torch.nn.Linear(3840 * 49, 3840, bias=False, dtype=torch.bfloat16)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -29,6 +29,7 @@ class GemmaFeaturesExtractorProjLinear(torch.nn.Module, ModelConfigurator["Gemma
         Returns:
             torch.Tensor: Output tensor of shape (batch_size, 3840).
         """
+        print(x.dtype)
         return self.aggregate_embed(x)
 
     @classmethod

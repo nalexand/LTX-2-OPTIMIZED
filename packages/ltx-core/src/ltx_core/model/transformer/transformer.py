@@ -9,6 +9,8 @@ from ltx_core.model.transformer.rope import LTXRopeType
 from ltx_core.model.transformer.transformer_args import TransformerArgs
 from ltx_core.utils import rms_norm
 
+#from line_profiler import profile
+
 
 @dataclass
 class TransformerConfig:
@@ -103,17 +105,19 @@ class BasicAVTransformerBlock(torch.nn.Module):
 
         self.norm_eps = norm_eps
 
+    #@profile 1.26368 s
     def get_ada_values(
         self, scale_shift_table: torch.Tensor, batch_size: int, timestep: torch.Tensor, indices: slice
     ) -> tuple[torch.Tensor, ...]:
         num_ada_params = scale_shift_table.shape[0]
 
         ada_values = (
-            scale_shift_table[indices].unsqueeze(0).unsqueeze(0).to(device=timestep.device, dtype=timestep.dtype)
+            scale_shift_table[indices].unsqueeze(0).unsqueeze(0).to(device=timestep.device, dtype=timestep.dtype)  # 89.6%
             + timestep.reshape(batch_size, timestep.shape[1], num_ada_params, -1)[:, :, indices, :]
         ).unbind(dim=2)
         return ada_values
 
+    #@profile 0.925723 s
     def get_av_ca_ada_values(
         self,
         scale_shift_table: torch.Tensor,
@@ -122,7 +126,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
         gate_timestep: torch.Tensor,
         num_scale_shift_values: int = 4,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        scale_shift_ada_values = self.get_ada_values(
+        scale_shift_ada_values = self.get_ada_values(  # 86%
             scale_shift_table[:num_scale_shift_values, :], batch_size, scale_shift_timestep, slice(None, None)
         )
         gate_ada_values = self.get_ada_values(
@@ -134,6 +138,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
 
         return (*scale_shift_chunks, *gate_ada_values)
 
+    #@profile 859.862 s
     def forward(  # noqa: PLR0915
         self,
         video: TransformerArgs | None,
@@ -160,9 +165,9 @@ class BasicAVTransformerBlock(torch.nn.Module):
             if not perturbations.all_in_batch(PerturbationType.SKIP_VIDEO_SELF_ATTN, self.idx):
                 norm_vx = rms_norm(vx, eps=self.norm_eps) * (1 + vscale_msa) + vshift_msa
                 v_mask = perturbations.mask_like(PerturbationType.SKIP_VIDEO_SELF_ATTN, self.idx, vx)
-                vx = vx + self.attn1(norm_vx, pe=video.positional_embeddings) * vgate_msa * v_mask
+                vx = vx + self.attn1(norm_vx, pe=video.positional_embeddings) * vgate_msa * v_mask  # 24%
 
-            vx = vx + self.attn2(rms_norm(vx, eps=self.norm_eps), context=video.context, mask=video.context_mask)
+            vx = vx + self.attn2(rms_norm(vx, eps=self.norm_eps), context=video.context, mask=video.context_mask)  # 14%
 
             del vshift_msa, vscale_msa, vgate_msa
 
@@ -258,7 +263,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                 self.scale_shift_table, vx.shape[0], video.timesteps, slice(3, None)
             )
             vx_scaled = rms_norm(vx, eps=self.norm_eps) * (1 + vscale_mlp) + vshift_mlp
-            vx = vx + self.ff(vx_scaled) * vgate_mlp
+            vx = vx + self.ff(vx_scaled) * vgate_mlp  # 33%
 
             del vshift_mlp, vscale_mlp, vgate_mlp
 
