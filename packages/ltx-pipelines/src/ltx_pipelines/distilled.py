@@ -1,5 +1,8 @@
 import logging
 import time
+import hashlib
+import os
+
 from collections.abc import Iterator
 
 import torch
@@ -35,6 +38,8 @@ from ltx_pipelines.utils.media_io import encode_video
 from ltx_pipelines.utils.types import PipelineComponents
 
 device = get_device()
+
+logging.basicConfig(level=logging.ERROR)
 
 
 class DistilledPipeline:
@@ -85,10 +90,7 @@ class DistilledPipeline:
             tiling_config: TilingConfig | None = None,
             enhance_prompt: bool = False,
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
-        import hashlib
-        import os
-
-        print("Start Call")
+        print("Preparing Inference")
         startAt = time.time()
         assert_resolution(height=height, width=width, is_two_stage=True)
 
@@ -96,7 +98,6 @@ class DistilledPipeline:
         noiser = GaussianNoiser(generator=generator)
         stepper = EulerDiffusionStep()
         dtype = torch.bfloat16
-        print("starting text encoder", time.time() - startAt)
 
         # --- DISK CACHE LOGIC START ---
         CACHE_DIR = "./prompt_embeddings_cache"
@@ -121,7 +122,7 @@ class DistilledPipeline:
         context_p = None
 
         if os.path.exists(cache_path):
-            print(f"Disk cache hit! Loading embeddings from {cache_path}")
+            print(f"Prompt cache hit! Loading embeddings from {cache_path}")
             try:
                 # Load directly to the correct device
                 # For distilled, we only saved context_p
@@ -131,7 +132,7 @@ class DistilledPipeline:
 
         # If cache miss or load failed
         if context_p is None:
-            print("Disk cache miss. Running text encoder.")
+            print("Prompt cache miss. Running text encoder.")
             text_encoder = self.model_ledger.text_encoder()
 
             # Logic to handle prompt enhancement
@@ -148,6 +149,7 @@ class DistilledPipeline:
             # Save to disk for next time
             print(f"Saving embeddings to {cache_path}")
             torch.save(context_p, cache_path)
+            print("Prompt encoded.", time.time() - startAt)
 
             torch.cuda.synchronize()
             del text_encoder
@@ -157,9 +159,7 @@ class DistilledPipeline:
         # Unpack the positive context (Distilled usually splits this into video/audio context)
         video_context, audio_context = context_p
 
-        print("end text encoder", time.time() - startAt)
-
-        print("Stage 1: Initial low resolution video generation.", time.time() - startAt)
+        print("Stage 1: Initial low resolution video generation.")
         # Stage 1: Initial low resolution video generation.
         video_encoder = self.model_ledger.video_encoder()
         transformer = self.model_ledger.transformer()
@@ -208,14 +208,13 @@ class DistilledPipeline:
             dtype=dtype,
             device=self.device,
         )
-        print("Stage 1: End denoising loop.", time.time() - startAt)
+        print("Stage 1: Finish denoising loop.", time.time() - startAt)
 
         print("Stage 2: Upsample and refine the video at higher resolution with distilled LORA.", time.time() - startAt)
         # Stage 2: Upsample and refine the video at higher resolution with distilled LORA.
         upscaled_video_latent = upsample_video(
             latent=video_state.latent[:1], video_encoder=video_encoder, upsampler=self.model_ledger.spatial_upsampler()
         )
-        print("Stage 2: Upsample and refine the video end.", time.time() - startAt)
 
         torch.cuda.synchronize()
         cleanup_memory()
@@ -244,17 +243,17 @@ class DistilledPipeline:
             initial_video_latent=upscaled_video_latent,
             initial_audio_latent=audio_state.latent,
         )
-        print("Stage 2: Upsample and refine the video end.", time.time() - startAt)
+        print("Stage 2: Finish upsample and refine the video.", time.time() - startAt)
         torch.cuda.synchronize()
         del transformer
         del video_encoder
         cleanup_memory()
-
+        print("Stage 3: Starting vae decode video.", time.time() - startAt)
         decoded_video = vae_decode_video(video_state.latent, self.model_ledger.video_decoder(), tiling_config)
         decoded_audio = vae_decode_audio(
             audio_state.latent, self.model_ledger.audio_decoder(), self.model_ledger.vocoder()
         )
-        print("Stage 2:vae decode video end.", time.time() - startAt)
+        print("Stage 3: Done.", time.time() - startAt)
         return decoded_video, decoded_audio
 
 
