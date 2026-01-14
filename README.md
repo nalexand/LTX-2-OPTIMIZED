@@ -10,7 +10,7 @@ It includes a fully-featured **Gradio Web Interface** to make generating videos,
 *   **8GB VRAM Optimization:** Runs locally on cards like the RTX 3070/4060Ti using FP8 quantization and memory management tweaks.
 *   **Windows 11 support!!!** You can even run it on Windows (not supported in original model).
 *   **User-Friendly Web UI:** Control everything from your browser.
-*   **Smart "Safe Mode":** The UI automatically limits the frame count based on selected resolution to prevent Out-Of-Memory (OOM) errors.
+*   **Smart "Safe Mode":** The UI automatically limits the frame count based on selected resolution to prevent Out-Of-Memory (OOM) errors. (if you do not have 8 Gb free vram try decrease frames count)
 *   **Real-time Logging:** View the generation progress and console output directly in the web interface.
 *   **Advanced Features:**
     *   **Image Conditioning:** Upload reference images.
@@ -61,6 +61,16 @@ Run the web interface with a single command:
 ```Bash
 python web_ui_v2.py
 ```
+
+**📊 Performance & Presets (8GB VRAM)**
+* The Web UI includes an "8GB VRAM Safe Mode" checkbox. When enabled, it enforces the following limits to ensure you don't crash your GPU. Est. inference time on 3070Ti laptop GPU ~300sec for all presets.
+* Resolution	Max Frames	Est. Time (3070ti laptop 8gb vram)
+* 1280 x 704	177	      ~300 sec
+* 1536 x 1024	121	      ~300 sec
+* 1920 x 1088	81		      ~300 sec
+* 2560 x 1408	49		      ~315 sec
+* 3840 x 2176	17	         ~315 sec
+* +60 sec for prompt (if not empty/not cached) 
 
 **Credits**
 * Original Model: Lightricks (LTX-2)
