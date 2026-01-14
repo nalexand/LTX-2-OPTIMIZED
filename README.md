@@ -4,6 +4,8 @@ This repository contains a **modified and optimized version of the LTX-2 Video G
 
 It includes a fully-featured **Gradio Web Interface** to make generating videos, managing presets, and applying LoRAs easy without needing to remember complex command-line arguments.
 
+<img width="2260" height="1078" alt="image" src="https://github.com/user-attachments/assets/5a9f5dce-f313-44a3-bbbe-10eccc002191" />
+
 
 ## 🚀 Features
 
