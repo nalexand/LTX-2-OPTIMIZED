@@ -1,65 +1,64 @@
 import torch
-# import triton
 
 from ltx_core.loader.kernels import fused_add_round_kernel
 from ltx_core.loader.primitives import LoraStateDictWithStrength, StateDict
 
 BLOCK_SIZE = 1024
 
+try:
+    import triton
 
-def fused_add_round_launch(target_weight: torch.Tensor, original_weight: torch.Tensor, seed: int) -> torch.Tensor:
-    """
-    Native PyTorch implementation of fused_add_round_launch.
+    def fused_add_round_launch(target_weight: torch.Tensor, original_weight: torch.Tensor, seed: int) -> torch.Tensor:
+        if original_weight.dtype == torch.float8_e4m3fn:
+            exponent_bits, mantissa_bits, exponent_bias = 4, 3, 7
+        elif original_weight.dtype == torch.float8_e5m2:
+            exponent_bits, mantissa_bits, exponent_bias = 5, 2, 15  # noqa: F841
+        else:
+            raise ValueError("Unsupported dtype")
 
-    Note:
-    1. Requires PyTorch 2.1 or newer for torch.float8 support.
-    2. The 'seed' argument is accepted to maintain API compatibility but is ignored
-       because native PyTorch addition uses deterministic Round-To-Nearest-Even (RTNE)
-       rather than stochastic rounding.
-    """
-    # Validation logic from original function
-    if original_weight.dtype not in [torch.float8_e4m3fn, torch.float8_e5m2]:
-        raise ValueError("Unsupported dtype")
+        if target_weight.dtype != torch.bfloat16:
+            raise ValueError("target_weight dtype must be bfloat16")
 
-    if target_weight.dtype != torch.bfloat16:
-        raise ValueError("target_weight dtype must be bfloat16")
+        # Calculate grid and block sizes
+        n_elements = original_weight.numel()
+        grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
 
-    # Implementation:
-    # 1. Cast original_weight (fp8) to target_weight dtype (bf16).
-    #    Since bf16 has higher dynamic range and precision than fp8, this upcast is exact.
-    # 2. Add in-place.
-    target_weight.add_(original_weight.to(target_weight.dtype))
+        # Launch kernel
+        fused_add_round_kernel[grid](
+            original_weight,
+            target_weight,
+            seed,
+            n_elements,
+            exponent_bias,
+            mantissa_bits,
+            BLOCK_SIZE,
+        )
+        return target_weight
+except Exception:
+    def fused_add_round_launch(target_weight: torch.Tensor, original_weight: torch.Tensor, seed: int) -> torch.Tensor:
+        """
+        Native PyTorch implementation of fused_add_round_launch.
 
-    return target_weight
+        Note:
+        1. Requires PyTorch 2.1 or newer for torch.float8 support.
+        2. The 'seed' argument is accepted to maintain API compatibility but is ignored
+           because native PyTorch addition uses deterministic Round-To-Nearest-Even (RTNE)
+           rather than stochastic rounding.
+        """
+        # Validation logic from original function
+        if original_weight.dtype not in [torch.float8_e4m3fn, torch.float8_e5m2]:
+            raise ValueError("Unsupported dtype")
 
+        if target_weight.dtype != torch.bfloat16:
+            raise ValueError("target_weight dtype must be bfloat16")
 
-def fused_add_round_launch__(target_weight: torch.Tensor, original_weight: torch.Tensor, seed: int) -> torch.Tensor:
-    if original_weight.dtype == torch.float8_e4m3fn:
-        exponent_bits, mantissa_bits, exponent_bias = 4, 3, 7
-    elif original_weight.dtype == torch.float8_e5m2:
-        exponent_bits, mantissa_bits, exponent_bias = 5, 2, 15  # noqa: F841
-    else:
-        raise ValueError("Unsupported dtype")
+        # Implementation:
+        # 1. Cast original_weight (fp8) to target_weight dtype (bf16).
+        #    Since bf16 has higher dynamic range and precision than fp8, this upcast is exact.
+        # 2. Add in-place.
+        target_weight.add_(original_weight.to(target_weight.dtype))
 
-    if target_weight.dtype != torch.bfloat16:
-        raise ValueError("target_weight dtype must be bfloat16")
-
-    # Calculate grid and block sizes
-    n_elements = original_weight.numel()
-    #grid = (triton.cdiv(n_elements, BLOCK_SIZE),)
-    grid = 0
-
-    # Launch kernel
-    fused_add_round_kernel[grid](
-        original_weight,
-        target_weight,
-        seed,
-        n_elements,
-        exponent_bias,
-        mantissa_bits,
-        BLOCK_SIZE,
-    )
-    return target_weight
+        return target_weight
 
 
 def calculate_weight_float8_(target_weights: torch.Tensor, original_weights: torch.Tensor) -> torch.Tensor:

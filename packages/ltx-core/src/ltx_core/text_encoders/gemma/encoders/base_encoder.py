@@ -3,7 +3,7 @@ from pathlib import Path
 
 import torch
 from einops import rearrange
-from transformers import AutoImageProcessor, Gemma3ForConditionalGeneration, Gemma3Processor, BitsAndBytesConfig
+from transformers import AutoImageProcessor, Gemma3ForConditionalGeneration, Gemma3Processor
 
 from ltx_core.loader.module_ops import ModuleOps
 from ltx_core.text_encoders.gemma.feature_extractor import GemmaFeaturesExtractorProjLinear
@@ -44,16 +44,12 @@ class GemmaTextEncoderModelBase(torch.nn.Module):
         encoded_text_features = torch.stack(hidden_states, dim=-1)
         encoded_text_features_dtype = encoded_text_features.dtype
 
-        print(encoded_text_features_dtype)
-
         sequence_lengths = attention_mask.sum(dim=-1)
         normed_concated_encoded_text_features = _norm_and_concat_padded_batch(
             encoded_text_features, sequence_lengths, padding_side=padding_side
         )
-        print("normed_concated_encoded_text_features")
-        print(normed_concated_encoded_text_features.dtype)
 
-        return self.feature_extractor_linear(normed_concated_encoded_text_features.to(torch.bfloat16))
+        return self.feature_extractor_linear(normed_concated_encoded_text_features.to(encoded_text_features_dtype))
 
     def _convert_to_additive_mask(self, attention_mask: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         return (attention_mask - 1).to(dtype).reshape(
@@ -248,24 +244,12 @@ def module_ops_from_gemma_root(gemma_root: str) -> tuple[ModuleOps, ...]:
     tokenizer_path = _find_matching_dir(gemma_root, "tokenizer.model")
 
     def load_gemma(module: GemmaTextEncoderModelBase) -> GemmaTextEncoderModelBase:
-        #max_memory = {0: "8GiB", "cpu": "32GiB"}
-        # 2. Load the model
-        #module.model = Gemma3ForConditionalGeneration.from_pretrained(
-        #    gemma_path,
-        #    local_files_only=True,
-        #    device_map="auto",
-        #    max_memory=max_memory
-        #)
-
-        # Reserve 2GB VRAM for context window and activations
-        # Limit Gemma to 6GB, forcing more layers to CPU RAM
-        max_memory = {0: "3GiB", "cpu": "32GiB"}  # GPU 0: 6GB, CPU: 32GB
         module.model = Gemma3ForConditionalGeneration.from_pretrained(
             gemma_path,
             local_files_only=True,
             torch_dtype=torch.bfloat16,
-            device_map="auto",  # Enable sequential offloading
-            max_memory=max_memory  # Reserve 2GB VRAM for inference
+            device_map="auto",
+            max_memory={0: "3GiB", "cpu": "32GiB"}
         )
         module._gemma_root = module._gemma_root or gemma_root
         return module
