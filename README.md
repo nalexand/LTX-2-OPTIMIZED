@@ -4,13 +4,15 @@ This repository contains a **modified and optimized version of the LTX-2 Video G
 
 It includes a fully-featured **Gradio Web Interface** to make generating videos, managing presets, and applying LoRAs easy without needing to remember complex command-line arguments.
 
+<img width="2260" height="1078" alt="image" src="https://github.com/user-attachments/assets/5a9f5dce-f313-44a3-bbbe-10eccc002191" />
+
 
 ## 🚀 Features
 
 *   **8GB VRAM Optimization:** Runs locally on cards like the RTX 3070/4060Ti using FP8 quantization and memory management tweaks.
 *   **Windows 11 support!!!** You can even run it on Windows (not supported in original model).
 *   **User-Friendly Web UI:** Control everything from your browser.
-*   **Smart "Safe Mode":** The UI automatically limits the frame count based on selected resolution to prevent Out-Of-Memory (OOM) errors.
+*   **Smart "Safe Mode":** The UI automatically limits the frame count based on selected resolution to prevent Out-Of-Memory (OOM) errors. (if you do not have 8 Gb free vram try decrease frames count)
 *   **Real-time Logging:** View the generation progress and console output directly in the web interface.
 *   **Advanced Features:**
     *   **Image Conditioning:** Upload reference images.
@@ -28,7 +30,9 @@ mkdir models/loras
 ```
 
 **2. Download the models:**
-* You can find the compatible models via the links provided in the original optimized repository or the Lightricks HuggingFace page.
+* [`ltx-2-19b-distilled-fp8.safetensors`](https://huggingface.co/Lightricks/LTX-2/blob/main/ltx-2-19b-distilled-fp8.safetensors) - [Download](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-19b-distilled-fp8.safetensors)
+* [`ltx-2-spatial-upscaler-x2-1.0.safetensors`](https://huggingface.co/Lightricks/LTX-2/blob/main/ltx-2-spatial-upscaler-x2-1.0.safetensors) - [Download](https://huggingface.co/Lightricks/LTX-2/resolve/main/ltx-2-spatial-upscaler-x2-1.0.safetensors)
+* [`Gemma 3`](https://huggingface.co/google/gemma-3-12b-it-qat-q4_0-unquantized/tree/main)
 ```
 ./models/
     ltx-2-19b-distilled-fp8.safetensors	
@@ -38,7 +42,7 @@ mkdir models/loras
     gemma-3 files
 
 ./models/loras/
-    loras
+    lora files here
 ```
 **3. Install all required modules:**
 ```
@@ -60,7 +64,17 @@ Run the web interface with a single command:
 python web_ui_v2.py
 ```
 
-##Credits
+**📊 Performance & Presets (8GB VRAM)**
+* The Web UI includes an "8GB VRAM Safe Mode" checkbox. When enabled, it enforces the following limits to ensure you don't crash your GPU. Est. inference time on 3070Ti laptop GPU ~300sec for all presets.
+* Resolution	Max Frames	Est. Time (3070ti laptop 8gb vram)
+* 1280 x 704	177	      ~300 sec
+* 1536 x 1024	121	      ~300 sec
+* 1920 x 1088	81		      ~300 sec
+* 2560 x 1408	49		      ~315 sec
+* 3840 x 2176	17	         ~315 sec
+* +60 sec for prompt (if not empty/not cached) 
+
+**Credits**
 * Original Model: Lightricks (LTX-2)
 * Optimization: nalexand
 * Web UI: Created for the community to make this powerful model accessible.
