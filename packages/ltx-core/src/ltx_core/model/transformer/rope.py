@@ -38,6 +38,35 @@ def apply_interleaved_rotary_emb(
 
     return out
 
+def apply_split_rotary_emb_(
+    input_tensor: torch.Tensor,
+    cos_freqs: torch.Tensor,
+    sin_freqs: torch.Tensor
+) -> torch.Tensor:
+    needs_reshape = False
+    orig_shape = None
+    if input_tensor.ndim != 4 and cos_freqs.ndim == 4:
+        b, h, t, _ = cos_freqs.shape
+        orig_shape = (b, t, -1)
+        input_tensor = input_tensor.view(b, t, h, -1).transpose(1, 2)
+        needs_reshape = True
+
+    d = input_tensor.shape[-1]
+    half = d // 2
+    x_even = input_tensor[..., :half]
+    x_odd = input_tensor[..., half:]
+
+    even_rot = x_even * cos_freqs - x_odd * sin_freqs
+    odd_rot = x_even * sin_freqs + x_odd * cos_freqs
+
+    output = torch.empty_like(input_tensor)
+    output[..., :half] = even_rot
+    output[..., half:] = odd_rot
+
+    if needs_reshape:
+        output = output.transpose(1, 2).reshape(*orig_shape)
+
+    return output
 
 def apply_split_rotary_emb(
     input_tensor: torch.Tensor, cos_freqs: torch.Tensor, sin_freqs: torch.Tensor

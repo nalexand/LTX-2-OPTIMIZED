@@ -126,6 +126,9 @@ def _upcast_and_round(
     Upcast the weight to the given dtype and optionally apply stochastic rounding.
     Input weight needs to have float8_e4m3fn or float8_e5m2 dtype.
     """
+    if weight.dtype == dtype:
+        return weight
+
     if not with_stochastic_rounding:
         return weight.to(dtype)
     return fused_add_round_launch(torch.zeros_like(weight, dtype=dtype), weight, seed)
