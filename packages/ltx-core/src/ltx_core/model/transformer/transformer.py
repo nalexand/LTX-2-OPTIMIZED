@@ -100,12 +100,13 @@ class BasicAVTransformerBlock(torch.nn.Module):
         self.norm_eps = norm_eps
 
     def get_ada_values(
-            self, scale_shift_table: torch.Tensor, batch_size: int, timestep: torch.Tensor, indices: slice
+            self, scale_shift_table: torch.Tensor, batch_size: int, timestep: torch.Tensor, indices: slice, is_conditioning: bool = False
     ) -> tuple[torch.Tensor, ...]:
         num_ada_params = scale_shift_table.shape[0]
 
-        if timestep.dim() > 2 and timestep.shape[1] > 1:
-            timestep = timestep[:, [0], ...]
+        if not is_conditioning:
+            if timestep.dim() > 2 and timestep.shape[1] > 1:
+                timestep = timestep[:, [0], ...]
 
         table_slice = scale_shift_table[indices]
         if table_slice.device != timestep.device or table_slice.dtype != timestep.dtype:
@@ -124,12 +125,13 @@ class BasicAVTransformerBlock(torch.nn.Module):
             scale_shift_timestep: torch.Tensor,
             gate_timestep: torch.Tensor,
             num_scale_shift_values: int = 4,
+            is_conditioning: bool = True
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         scale_shift_ada_values = self.get_ada_values(
-            scale_shift_table[:num_scale_shift_values, :], batch_size, scale_shift_timestep, slice(None, None)
+            scale_shift_table[:num_scale_shift_values, :], batch_size, scale_shift_timestep, slice(None, None), is_conditioning
         )
         gate_ada_values = self.get_ada_values(
-            scale_shift_table[num_scale_shift_values:, :], batch_size, gate_timestep, slice(None, None)
+            scale_shift_table[num_scale_shift_values:, :], batch_size, gate_timestep, slice(None, None), is_conditioning
         )
 
         scale_shift_chunks = [t.squeeze(2) for t in scale_shift_ada_values]
@@ -142,6 +144,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
             video: TransformerArgs | None,
             audio: TransformerArgs | None,
             perturbations: BatchedPerturbationConfig | None = None,
+            is_conditioning: bool = True
     ) -> tuple[TransformerArgs | None, TransformerArgs | None]:
         batch_size = video.x.shape[0] if video is not None else (audio.x.shape[0] if audio is not None else 0)
         if perturbations is None:
@@ -159,7 +162,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
         # --- Video Self-Attention & Cross-Attention ---
         if run_vx:
             vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
-                self.scale_shift_table, vx.shape[0], video.timesteps, slice(0, 3)
+                self.scale_shift_table, vx.shape[0], video.timesteps, slice(0, 3), is_conditioning
             )
 
             if not perturbations.all_in_batch(PerturbationType.SKIP_VIDEO_SELF_ATTN, self.idx):
@@ -186,7 +189,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
         # --- Audio Self-Attention & Cross-Attention ---
         if run_ax:
             ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
-                self.audio_scale_shift_table, ax.shape[0], audio.timesteps, slice(0, 3)
+                self.audio_scale_shift_table, ax.shape[0], audio.timesteps, slice(0, 3), is_conditioning
             )
 
             if not perturbations.all_in_batch(PerturbationType.SKIP_AUDIO_SELF_ATTN, self.idx):
@@ -340,7 +343,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
         # --- FFN Layers ---
         if run_vx:
             vshift_mlp, vscale_mlp, vgate_mlp = self.get_ada_values(
-                self.scale_shift_table, vx.shape[0], video.timesteps, slice(3, None)
+                self.scale_shift_table, vx.shape[0], video.timesteps, slice(3, None), is_conditioning
             )
             # Optimization: In-place scaling of the normalized input
             vx_scaled = rms_norm(vx, eps=self.norm_eps)
@@ -353,7 +356,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
 
         if run_ax:
             ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
-                self.audio_scale_shift_table, ax.shape[0], audio.timesteps, slice(3, None)
+                self.audio_scale_shift_table, ax.shape[0], audio.timesteps, slice(3, None), is_conditioning
             )
             # Optimization: In-place scaling
             ax_scaled = rms_norm(ax, eps=self.norm_eps)

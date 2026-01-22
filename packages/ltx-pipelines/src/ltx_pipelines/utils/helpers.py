@@ -331,7 +331,7 @@ def timesteps_from_mask(denoise_mask: torch.Tensor, sigma: float | torch.Tensor)
 
 #@profile
 def simple_denoising_func(
-    video_context: torch.Tensor, audio_context: torch.Tensor, transformer: X0Model
+    video_context: torch.Tensor, audio_context: torch.Tensor, transformer: X0Model, is_conditioning
 ) -> DenoisingFunc:
     def simple_denoising_step(
         video_state: LatentState, audio_state: LatentState, sigmas: torch.Tensor, step_index: int
@@ -340,7 +340,7 @@ def simple_denoising_func(
         pos_video = modality_from_latent_state(video_state, video_context, sigma)
         pos_audio = modality_from_latent_state(audio_state, audio_context, sigma)
 
-        denoised_video, denoised_audio = transformer(video=pos_video, audio=pos_audio, perturbations=None)  # 100%
+        denoised_video, denoised_audio = transformer(video=pos_video, audio=pos_audio, perturbations=None, is_conditioning=is_conditioning)  # 100%
         return denoised_video, denoised_audio
 
     return simple_denoising_step
@@ -389,6 +389,7 @@ def denoise_audio_video(  # noqa: PLR0913
     noise_scale: float = 1.0,
     initial_video_latent: torch.Tensor | None = None,
     initial_audio_latent: torch.Tensor | None = None,
+    is_conditioning: bool = True
 ) -> tuple[LatentState, LatentState]:
     video_state, video_tools = noise_video_state(
         output_shape=output_shape,
@@ -416,6 +417,7 @@ def denoise_audio_video(  # noqa: PLR0913
         video_state,
         audio_state,
         stepper,
+        is_conditioning,
     )
 
     video_state = video_tools.clear_conditioning(video_state)

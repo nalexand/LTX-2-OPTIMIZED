@@ -176,7 +176,7 @@ class DistilledPipeline:
         # stage_1_sigmas = self.get_interpolated_sigmas(16, self.device)
 
         def denoising_loop(
-                sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol
+                sigmas: torch.Tensor, video_state: LatentState, audio_state: LatentState, stepper: DiffusionStepProtocol, is_conditioning: bool = True
         ) -> tuple[LatentState, LatentState]:
             return euler_denoising_loop(
                 sigmas=sigmas,
@@ -187,6 +187,7 @@ class DistilledPipeline:
                     video_context=video_context,
                     audio_context=audio_context,
                     transformer=transformer,  # noqa: F821
+                    is_conditioning=is_conditioning,
                 ),
             )
         stage_1_output_shape = VideoPixelShape(
@@ -221,6 +222,7 @@ class DistilledPipeline:
             components=self.pipeline_components,
             dtype=dtype,
             device=self.device,
+            is_conditioning=len(images) > 0
         )
         print("Stage 1: Finish denoising loop.", time.time() - startAt)
         torch.cuda.synchronize()
@@ -229,7 +231,7 @@ class DistilledPipeline:
         del stage_1_conditionings
         cleanup_memory()
 
-        if False:  # save step 1 result video
+        if True:  # save step 1 result video
             video_decoder = self.model_ledger.video_decoder()
             decoded_video = vae_decode_video(video_state.latent, video_decoder, tiling_config)
             torch.cuda.synchronize()
@@ -291,6 +293,7 @@ class DistilledPipeline:
             noise_scale=stage_2_sigmas[0],
             initial_video_latent=upscaled_video_latent,
             initial_audio_latent=audio_state.latent,
+            is_conditioning=len(images) > 0
         )
         print("Stage 2: Finish upsample and refine the video.", time.time() - startAt)
         torch.cuda.synchronize()

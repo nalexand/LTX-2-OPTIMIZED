@@ -333,6 +333,7 @@ class LTXModel(torch.nn.Module):
         video: TransformerArgs | None,
         audio: TransformerArgs | None,
         perturbations: BatchedPerturbationConfig,
+        is_conditioning: bool = True
     ) -> tuple[TransformerArgs, TransformerArgs]:
         """Process transformer blocks for LTXAV."""
 
@@ -354,6 +355,7 @@ class LTXModel(torch.nn.Module):
                     video=video,
                     audio=audio,
                     perturbations=perturbations,
+                    is_conditioning=is_conditioning,
                 )
 
         return video, audio
@@ -381,7 +383,7 @@ class LTXModel(torch.nn.Module):
 
     #@profile 502.847 s
     def forward(
-        self, video: Modality | None, audio: Modality | None, perturbations: BatchedPerturbationConfig
+        self, video: Modality | None, audio: Modality | None, perturbations: BatchedPerturbationConfig, is_conditioning: bool = True
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Forward pass for LTX models.
@@ -400,6 +402,7 @@ class LTXModel(torch.nn.Module):
             video=video_args,
             audio=audio_args,
             perturbations=perturbations,
+            is_conditioning=is_conditioning,
         )
 
         # Process output
@@ -468,13 +471,14 @@ class X0Model(torch.nn.Module):
         video: Modality | None,
         audio: Modality | None,
         perturbations: BatchedPerturbationConfig,
+        is_conditioning: bool = True
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """
         Denoise the video and audio according to the sigma.
         Returns:
             Denoised video and audio
         """
-        vx, ax = self.velocity_model(video, audio, perturbations)  # 100%
+        vx, ax = self.velocity_model(video, audio, perturbations, is_conditioning)  # 100%
         denoised_video = to_denoised(video.latent, vx, video.timesteps) if vx is not None else None
         denoised_audio = to_denoised(audio.latent, ax, audio.timesteps) if ax is not None else None
         return denoised_video, denoised_audio
