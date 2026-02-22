@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, field
 
 import torch
 
@@ -187,6 +188,89 @@ class LegacyStatefulAPGGuider(GuiderProtocol):
 
     def enabled(self) -> bool:
         return self.scale != 0.0
+
+
+@dataclass(frozen=True)
+class MultiModalGuiderParams:
+    """
+    Parameters for the multi-modal guider.
+    """
+
+    cfg_scale: float = 1.0
+    "CFG (Classifier-free guidance) scale controlling how strongly the model adheres to the prompt."
+    stg_scale: float = 0.0
+    "STG (Spatio-Temporal Guidance) scale controls how strongly the model reacts to the perturbation of the modality."
+    stg_blocks: list[int] | None = field(default_factory=list)
+    "Which transformer blocks to perturb for STG."
+    rescale_scale: float = 0.0
+    "Rescale scale controlling how strongly the model rescales the modality after applying other guidance."
+    modality_scale: float = 1.0
+    "Modality scale controlling how strongly the model reacts to the perturbation of the modality."
+    skip_step: int = 0
+    "Skip step controlling how often the model skips the step."
+
+
+@dataclass(frozen=True)
+class MultiModalGuider:
+    """
+    Multi-modal guider.
+    """
+
+    params: MultiModalGuiderParams
+    negative_context: torch.Tensor | None = None
+
+    def calculate(
+            self,
+            cond: torch.Tensor,
+            uncond_text: torch.Tensor | float,
+            uncond_perturbed: torch.Tensor | float,
+            uncond_modality: torch.Tensor | float,
+    ) -> torch.Tensor:
+        """
+        The guider calculates the guidance delta as (scale - 1) * (cond - uncond) for cfg and modality cfg,
+        and as scale * (cond - uncond) for stg, steering the denoising process away from the unconditioned
+        prediction.
+        """
+        pred = (
+                cond
+                + (self.params.cfg_scale - 1) * (cond - uncond_text)
+                + self.params.stg_scale * (cond - uncond_perturbed)
+                + (self.params.modality_scale - 1) * (cond - uncond_modality)
+        )
+
+        if self.params.rescale_scale != 0:
+            factor = cond.std() / pred.std()
+            factor = self.params.rescale_scale * factor + (1 - self.params.rescale_scale)
+            pred = pred * factor
+
+        return pred
+
+    def do_unconditional_generation(self) -> bool:
+        """
+        Returns True if the guider is doing unconditional generation.
+        """
+        return not math.isclose(self.params.cfg_scale, 1.0)
+
+    def do_perturbed_generation(self) -> bool:
+        """
+        Returns True if the guider is doing perturbed generation.
+        """
+        return not math.isclose(self.params.stg_scale, 0.0)
+
+    def do_isolated_modality_generation(self) -> bool:
+        """
+        Returns True if the guider is doing isolated modality generation.
+        """
+        return not math.isclose(self.params.modality_scale, 1.0)
+
+    def should_skip_step(self, step: int) -> bool:
+        """
+        Returns True if the guider should skip the step.
+        """
+        if self.params.skip_step == 0:
+            return False
+
+        return step % (self.params.skip_step + 1) != 0
 
 
 def projection_coef(to_project: torch.Tensor, project_onto: torch.Tensor) -> torch.Tensor:
