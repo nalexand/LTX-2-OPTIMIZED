@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -49,3 +50,13 @@ def to_denoised(
     if isinstance(sigma, torch.Tensor):
         sigma = sigma.to(calc_dtype)
     return (sample.to(calc_dtype) - velocity.to(calc_dtype) * sigma).to(sample.dtype)
+
+
+def find_matching_file(root_path: str, pattern: str) -> Path:
+    """
+    Recursively search for files matching a glob pattern and return the first match.
+    """
+    matches = list(Path(root_path).rglob(pattern))
+    if not matches:
+        raise FileNotFoundError(f"No files matching pattern '{pattern}' found under {root_path}")
+    return matches[0]

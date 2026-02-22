@@ -5,12 +5,19 @@ from dataclasses import replace
 import torch
 from tqdm import tqdm
 
+from ltx_core.components.guiders import MultiModalGuider
 from ltx_core.components.noisers import Noiser
 from ltx_core.components.protocols import DiffusionStepProtocol, GuiderProtocol
 from ltx_core.conditioning import (
     ConditioningItem,
     VideoConditionByKeyframeIndex,
     VideoConditionByLatentIndex,
+)
+from ltx_core.guidance.perturbations import (
+    BatchedPerturbationConfig,
+    Perturbation,
+    PerturbationConfig,
+    PerturbationType,
 )
 from ltx_core.model.transformer import Modality, X0Model
 from ltx_core.model.video_vae import VideoEncoder
@@ -380,6 +387,114 @@ def guider_denoising_func(
         return denoised_video, denoised_audio
 
     return guider_denoising_step
+
+
+def multi_modal_guider_denoising_func(
+    video_guider: MultiModalGuider,
+    audio_guider: MultiModalGuider,
+    v_context: torch.Tensor,
+    a_context: torch.Tensor,
+    transformer: X0Model,
+) -> DenoisingFunc:
+    last_denoised_video = None
+    last_denoised_audio = None
+
+    def guider_denoising_step(
+        video_state: LatentState, audio_state: LatentState, sigmas: torch.Tensor, step_index: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        nonlocal last_denoised_video, last_denoised_audio
+
+        if video_guider.should_skip_step(step_index) and audio_guider.should_skip_step(step_index):
+            return last_denoised_video, last_denoised_audio
+
+        sigma = sigmas[step_index]
+        pos_video_modality = modality_from_latent_state(
+            video_state, v_context, sigma, enabled=not video_guider.should_skip_step(step_index)
+        )
+        pos_audio_modality = modality_from_latent_state(
+            audio_state, a_context, sigma, enabled=not audio_guider.should_skip_step(step_index)
+        )
+
+        denoised_video, denoised_audio = transformer(
+            video=pos_video_modality, audio=pos_audio_modality, perturbations=None
+        )
+        neg_denoised_video, neg_denoised_audio = 0.0, 0.0
+        if video_guider.do_unconditional_generation() or audio_guider.do_unconditional_generation():
+            if video_guider.do_unconditional_generation() and video_guider.negative_context is None:
+                raise ValueError("Negative context is required for unconditioned denoising")
+            if audio_guider.do_unconditional_generation() and audio_guider.negative_context is None:
+                raise ValueError("Negative context is required for unconditioned denoising")
+            neg_video_modality = modality_from_latent_state(
+                video_state,
+                video_guider.negative_context
+                if video_guider.negative_context is not None
+                else pos_video_modality.context,
+                sigma,
+            )
+            neg_audio_modality = modality_from_latent_state(
+                audio_state,
+                audio_guider.negative_context
+                if audio_guider.negative_context is not None
+                else pos_audio_modality.context,
+                sigma,
+            )
+
+            neg_denoised_video, neg_denoised_audio = transformer(
+                video=neg_video_modality, audio=neg_audio_modality, perturbations=None
+            )
+
+        ptb_denoised_video, ptb_denoised_audio = 0.0, 0.0
+        if video_guider.do_perturbed_generation() or audio_guider.do_perturbed_generation():
+            perturbations = []
+            if video_guider.do_perturbed_generation():
+                perturbations.append(
+                    Perturbation(type=PerturbationType.SKIP_VIDEO_SELF_ATTN, blocks=video_guider.params.stg_blocks)
+                )
+            if audio_guider.do_perturbed_generation():
+                perturbations.append(
+                    Perturbation(type=PerturbationType.SKIP_AUDIO_SELF_ATTN, blocks=audio_guider.params.stg_blocks)
+                )
+            perturbation_config = PerturbationConfig(perturbations=perturbations)
+            ptb_denoised_video, ptb_denoised_audio = transformer(
+                video=pos_video_modality,
+                audio=pos_audio_modality,
+                perturbations=BatchedPerturbationConfig(perturbations=[perturbation_config]),
+            )
+
+        mod_denoised_video, mod_denoised_audio = 0.0, 0.0
+        if video_guider.do_isolated_modality_generation() or audio_guider.do_isolated_modality_generation():
+            perturbations = [
+                Perturbation(type=PerturbationType.SKIP_A2V_CROSS_ATTN, blocks=None),
+                Perturbation(type=PerturbationType.SKIP_V2A_CROSS_ATTN, blocks=None),
+            ]
+            perturbation_config = PerturbationConfig(perturbations=perturbations)
+            mod_denoised_video, mod_denoised_audio = transformer(
+                video=pos_video_modality,
+                audio=pos_audio_modality,
+                perturbations=BatchedPerturbationConfig(perturbations=[perturbation_config]),
+            )
+
+        if video_guider.should_skip_step(step_index):
+            denoised_video = last_denoised_video
+        else:
+            denoised_video = video_guider.calculate(
+                denoised_video, neg_denoised_video, ptb_denoised_video, mod_denoised_video
+            )
+
+        if audio_guider.should_skip_step(step_index):
+            denoised_audio = last_denoised_audio
+        else:
+            denoised_audio = audio_guider.calculate(
+                denoised_audio, neg_denoised_audio, ptb_denoised_audio, mod_denoised_audio
+            )
+
+        last_denoised_video = denoised_video
+        last_denoised_audio = denoised_audio
+
+        return denoised_video, denoised_audio
+
+    return guider_denoising_step
+
 
 #@profile 293.957 s
 def denoise_audio_video(  # noqa: PLR0913

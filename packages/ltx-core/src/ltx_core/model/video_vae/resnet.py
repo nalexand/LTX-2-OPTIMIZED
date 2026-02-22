@@ -99,7 +99,7 @@ class ResnetBlock3D(nn.Module):
         self.timestep_conditioning = timestep_conditioning
 
         if timestep_conditioning:
-            self.scale_shift_table = nn.Parameter(torch.randn(4, in_channels) / in_channels**0.5)
+            self.scale_shift_table = nn.Parameter(torch.zeros(4, in_channels))
 
     def _feed_spatial_noise(
         self,

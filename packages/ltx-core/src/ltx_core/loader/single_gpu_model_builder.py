@@ -81,7 +81,7 @@ class SingleGPUModelBuilder(Generic[ModelType], ModelBuilderProtocol[ModelType],
         target_device = torch.device("cuda") if device is None else device
         config = self.model_config()
         meta_model = self.meta_model(config, self.module_ops)
-        model_paths = self.model_path if isinstance(self.model_path, tuple) else [self.model_path]
+        model_paths = list(self.model_path) if isinstance(self.model_path, tuple) else [self.model_path]
         load_device = target_device if max_memory is None else torch.device("cpu")
         model_state_dict = self.load_sd(model_paths, sd_ops=self.model_sd_ops, registry=self.registry,
                                         device=load_device)

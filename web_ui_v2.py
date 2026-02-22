@@ -106,11 +106,12 @@ def run_generation(
         "--num-frames", str(int(num_frames)),
         "--frame-rate", str(frame_rate),
         "--num-inference-steps", str(int(steps)),
-        "--seed", str(int(seed))
+        "--seed", str(int(seed)),
+        "--quantization", "fp8-cast"
     ]
 
-    if enable_fp8:
-        cmd.append("--enable-fp8")
+    #if enable_fp8:
+    #   cmd.append("--quantization fp8-cast")
     if enhance_prompt:
         cmd.append("--enhance-prompt")
 

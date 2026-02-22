@@ -16,6 +16,7 @@ class TransformerConfig:
     heads: int
     d_head: int
     context_dim: int
+    apply_gated_attention: bool = False
 
 
 class BasicAVTransformerBlock(torch.nn.Module):
@@ -40,6 +41,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                 rope_type=rope_type,
                 norm_eps=norm_eps,
                 attention_function=attention_function,
+                apply_gated_attention=video.apply_gated_attention,
             )
             self.attn2 = Attention(
                 query_dim=video.dim,
@@ -49,6 +51,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                 rope_type=rope_type,
                 norm_eps=norm_eps,
                 attention_function=attention_function,
+                apply_gated_attention=video.apply_gated_attention,
             )
             self.ff = FeedForward(video.dim, dim_out=video.dim)
             self.scale_shift_table = torch.nn.Parameter(torch.empty(6, video.dim))
@@ -62,6 +65,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                 rope_type=rope_type,
                 norm_eps=norm_eps,
                 attention_function=attention_function,
+                apply_gated_attention=audio.apply_gated_attention,
             )
             self.audio_attn2 = Attention(
                 query_dim=audio.dim,
@@ -71,6 +75,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                 rope_type=rope_type,
                 norm_eps=norm_eps,
                 attention_function=attention_function,
+                apply_gated_attention=audio.apply_gated_attention,
             )
             self.audio_ff = FeedForward(audio.dim, dim_out=audio.dim)
             self.audio_scale_shift_table = torch.nn.Parameter(torch.empty(6, audio.dim))
@@ -84,6 +89,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                 rope_type=rope_type,
                 norm_eps=norm_eps,
                 attention_function=attention_function,
+                apply_gated_attention=video.apply_gated_attention,
             )
             self.video_to_audio_attn = Attention(
                 query_dim=audio.dim,
@@ -93,6 +99,7 @@ class BasicAVTransformerBlock(torch.nn.Module):
                 rope_type=rope_type,
                 norm_eps=norm_eps,
                 attention_function=attention_function,
+                apply_gated_attention=audio.apply_gated_attention,
             )
             self.scale_shift_table_a2v_ca_audio = torch.nn.Parameter(torch.empty(5, audio.dim))
             self.scale_shift_table_a2v_ca_video = torch.nn.Parameter(torch.empty(5, video.dim))
@@ -170,7 +177,11 @@ class BasicAVTransformerBlock(torch.nn.Module):
             perturbations: BatchedPerturbationConfig | None = None,
             is_conditioning: bool = True
     ) -> tuple[TransformerArgs | None, TransformerArgs | None]:
-        batch_size = video.x.shape[0] if video is not None else (audio.x.shape[0] if audio is not None else 0)
+        if video is None and audio is None:
+            raise ValueError("At least one of video or audio must be provided")
+
+        batch_size = (video or audio).x.shape[0]
+
         if perturbations is None:
             perturbations = BatchedPerturbationConfig.empty(batch_size)
 

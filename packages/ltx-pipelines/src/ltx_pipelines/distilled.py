@@ -16,6 +16,7 @@ from ltx_core.model.audio_vae import decode_audio as vae_decode_audio
 from ltx_core.model.upsampler import upsample_video
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.model.video_vae import decode_video as vae_decode_video
+from ltx_core.quantization import QuantizationPolicy
 from ltx_core.text_encoders.gemma import encode_text
 from ltx_core.types import LatentState, VideoPixelShape
 from ltx_pipelines.utils import ModelLedger
@@ -59,7 +60,7 @@ class DistilledPipeline:
         spatial_upsampler_path: str,
         loras: list[LoraPathStrengthAndSDOps],
         device: torch.device = device,
-        fp8transformer: bool = False,
+        quantization: QuantizationPolicy | None = None,
     ):
         self.device = device
         self.dtype = torch.bfloat16
@@ -71,7 +72,7 @@ class DistilledPipeline:
             spatial_upsampler_path=spatial_upsampler_path,
             gemma_root_path=gemma_root,
             loras=loras,
-            fp8transformer=fp8transformer,
+            quantization=quantization,
         )
 
         self.pipeline_components = PipelineComponents(
@@ -245,7 +246,7 @@ class DistilledPipeline:
 
         if save_step_1_preview:
             video_decoder = self.model_ledger.video_decoder()
-            decoded_video = vae_decode_video(video_state.latent, video_decoder, tiling_config)
+            decoded_video = vae_decode_video(video_state.latent, video_decoder, tiling_config, generator)
             torch.cuda.synchronize()
             del video_decoder
             cleanup_memory()
@@ -324,7 +325,7 @@ class DistilledPipeline:
         cleanup_memory()
         print("Stage 3: Starting vae decode video.", time.time() - startAt)
         video_decoder = self.model_ledger.video_decoder()
-        decoded_video = vae_decode_video(video_state.latent, video_decoder, tiling_config)
+        decoded_video = vae_decode_video(video_state.latent, video_decoder, tiling_config, generator)
         del video_decoder
         cleanup_memory()
 
@@ -351,7 +352,7 @@ def main() -> None:
         spatial_upsampler_path=args.spatial_upsampler_path,
         gemma_root=args.gemma_root,
         loras=args.lora,
-        fp8transformer=args.enable_fp8,
+        quantization=args.quantization,
     )
     tiling_config = TilingConfig.default()
     video_chunks_number = get_video_chunks_number(args.num_frames, tiling_config)

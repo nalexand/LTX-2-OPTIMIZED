@@ -11,7 +11,7 @@ import torch
 import torchaudio
 
 from ltx_core.components.diffusion_steps import EulerDiffusionStep
-from ltx_core.components.guiders import CFGGuider
+from ltx_core.components.guiders import MultiModalGuider, MultiModalGuiderParams
 from ltx_core.components.noisers import GaussianNoiser
 from ltx_core.components.protocols import DiffusionStepProtocol
 from ltx_core.components.schedulers import LTX2Scheduler
@@ -20,6 +20,7 @@ from ltx_core.model.audio_vae import decode_audio as vae_decode_audio
 from ltx_core.model.upsampler import upsample_video
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.model.video_vae import decode_video as vae_decode_video
+from ltx_core.quantization import QuantizationPolicy
 from ltx_core.text_encoders.gemma import encode_text
 from ltx_core.types import AudioLatentShape, LatentState, VideoPixelShape
 from ltx_pipelines.utils import ModelLedger
@@ -32,7 +33,7 @@ from ltx_pipelines.utils.helpers import (
     euler_denoising_loop,
     generate_enhanced_prompt,
     get_device,
-    guider_denoising_func,
+    multi_modal_guider_denoising_func,
     image_conditionings_by_replacing_latent,
     simple_denoising_func,
     noise_audio_state
@@ -73,7 +74,7 @@ class MusicToVideoTwoStagesPipeline:
         gemma_root: str,
         loras: list[LoraPathStrengthAndSDOps],
         device: torch.device = device,
-        fp8transformer: bool = False,
+        quantization: QuantizationPolicy | None = None,
     ):
         print("Start Init")
         startAt = time.time()
@@ -87,7 +88,7 @@ class MusicToVideoTwoStagesPipeline:
             gemma_root_path=gemma_root,
             spatial_upsampler_path=spatial_upsampler_path,
             loras=loras,
-            fp8transformer=fp8transformer,
+            quantization=quantization,
         )
 
         self.stage_2_model_ledger = ModelLedger(
@@ -97,7 +98,7 @@ class MusicToVideoTwoStagesPipeline:
             gemma_root_path=gemma_root,
             spatial_upsampler_path=spatial_upsampler_path,
             loras=[],  # Stage 2 distilled checkpoint doesn't need loras
-            fp8transformer=fp8transformer,
+            quantization=quantization,
         )
 
         self.pipeline_components = PipelineComponents(
@@ -154,7 +155,8 @@ class MusicToVideoTwoStagesPipeline:
             num_frames: int,
             frame_rate: float,
             num_inference_steps: int,
-            cfg_guidance_scale: float,
+            video_guider_params: MultiModalGuiderParams,
+            audio_guider_params: MultiModalGuiderParams,
             images: list[tuple[str, int, float]],
             audio_input_path: str | None = None,
             tiling_config: TilingConfig | None = None,
@@ -171,7 +173,6 @@ class MusicToVideoTwoStagesPipeline:
         generator = torch.Generator(device=self.device).manual_seed(seed)
         noiser = GaussianNoiser(generator=generator)
         stepper = EulerDiffusionStep()
-        cfg_guider = CFGGuider(cfg_guidance_scale)
         dtype = torch.bfloat16
         
         # --- LOAD AUDIO ---
@@ -302,13 +303,18 @@ class MusicToVideoTwoStagesPipeline:
                 
                 if loop_audio_latents is not None:
                      a_x = replace(a_x, latent=loop_audio_latents)
-                     
-                denoised_v, denoised_a = guider_denoising_func(
-                    cfg_guider,
-                    v_context_p,
-                    v_context_n,
-                    a_context_p,
-                    a_context_n,
+
+                denoised_v, denoised_a = multi_modal_guider_denoising_func(
+                    video_guider=MultiModalGuider(
+                        params=video_guider_params,
+                        negative_context=v_context_n,
+                    ),
+                    audio_guider=MultiModalGuider(
+                        params=audio_guider_params,
+                        negative_context=a_context_n,
+                    ),
+                    v_context=v_context_p,
+                    a_context=a_context_p,
                     transformer=transformer,
                 )(v_x, a_x, sigmas, i)
 
@@ -349,7 +355,7 @@ class MusicToVideoTwoStagesPipeline:
 
         if save_step_1_preview:
             video_decoder = self.stage_1_model_ledger.video_decoder()
-            decoded_video = vae_decode_video(video_state.latent, video_decoder, tiling_config)
+            decoded_video = vae_decode_video(video_state.latent, video_decoder, tiling_config, generator)
             del video_decoder
             cleanup_memory()
             
@@ -451,7 +457,7 @@ class MusicToVideoTwoStagesPipeline:
         del transformer
         cleanup_memory()
 
-        decoded_video = vae_decode_video(video_state.latent, self.stage_2_model_ledger.video_decoder(), tiling_config)
+        decoded_video = vae_decode_video(video_state.latent, self.stage_2_model_ledger.video_decoder(), tiling_config, generator)
         decoded_audio = None
         if audio_latents is not None:
             decoded_audio = vae_decode_audio(
@@ -473,7 +479,7 @@ def main() -> None:
         spatial_upsampler_path=args.spatial_upsampler_path,
         gemma_root=args.gemma_root,
         loras=args.lora,
-        fp8transformer=args.enable_fp8,
+        quantization=args.quantization,
     )
     tiling_config = TilingConfig.default()
     video_chunks_number = get_video_chunks_number(args.num_frames, tiling_config)
@@ -487,7 +493,22 @@ def main() -> None:
         num_frames=args.num_frames,
         frame_rate=args.frame_rate,
         num_inference_steps=args.num_inference_steps,
-        cfg_guidance_scale=args.cfg_guidance_scale,
+        video_guider_params=MultiModalGuiderParams(
+            cfg_scale=args.video_cfg_guidance_scale,
+            stg_scale=args.video_stg_guidance_scale,
+            rescale_scale=args.video_rescale_scale,
+            modality_scale=args.a2v_guidance_scale,
+            skip_step=args.video_skip_step,
+            stg_blocks=args.video_stg_blocks,
+        ),
+        audio_guider_params=MultiModalGuiderParams(
+            cfg_scale=args.audio_cfg_guidance_scale,
+            stg_scale=args.audio_stg_guidance_scale,
+            rescale_scale=args.audio_rescale_scale,
+            modality_scale=args.v2a_guidance_scale,
+            skip_step=args.audio_skip_step,
+            stg_blocks=args.audio_stg_blocks,
+        ),
         images=args.images,
         audio_input_path=args.audio_input_path,
         tiling_config=tiling_config,

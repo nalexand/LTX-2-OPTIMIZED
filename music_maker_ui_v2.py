@@ -236,7 +236,7 @@ def process_chain_generation(scenes_list, audios_list, start_images_list, last_i
             "--frame-rate", str(fps),
             "--num-inference-steps", str(int(steps)),
             "--seed", str(int(current_seed)),
-            "--enable-fp8"
+            "--quantization", "fp8-cast"
         ]
         
         if audio_path:

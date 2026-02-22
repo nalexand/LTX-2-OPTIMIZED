@@ -343,7 +343,7 @@ def process_chain_generation(scenes_list, checkpoint, gemma, upsampler, steps, f
             "--frame-rate", str(fps),
             "--num-inference-steps", str(int(steps)),
             "--seed", str(int(current_seed)),
-            "--enable-fp8"
+            "--quantization", "fp8-cast"
         ]
             
         for frame_path, latent_idx, guidance in conditioning_frames:

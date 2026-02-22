@@ -4,6 +4,7 @@
 
 # Noise schedule for the distilled pipeline. These sigma values control noise
 # levels at each denoising step and were tuned to match the distillation process.
+from ltx_core.components.guiders import MultiModalGuiderParams
 from ltx_core.types import SpatioTemporalScaleFactors
 
 DISTILLED_SIGMA_VALUES = [1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0]
@@ -24,13 +25,28 @@ DEFAULT_2_STAGE_WIDTH = DEFAULT_1_STAGE_WIDTH * 2
 DEFAULT_NUM_FRAMES = 121
 DEFAULT_FRAME_RATE = 24.0
 DEFAULT_NUM_INFERENCE_STEPS = 40
-DEFAULT_CFG_GUIDANCE_SCALE = 4.0
+DEFAULT_VIDEO_GUIDER_PARAMS = MultiModalGuiderParams(
+    cfg_scale=3.0,
+    stg_scale=1.0,
+    rescale_scale=0.7,
+    modality_scale=3.0,
+    skip_step=0,
+    stg_blocks=[29],
+)
 
 
 # =============================================================================
 # Audio
 # =============================================================================
 
+DEFAULT_AUDIO_GUIDER_PARAMS = MultiModalGuiderParams(
+    cfg_scale=7.0,
+    stg_scale=1.0,
+    rescale_scale=0.7,
+    modality_scale=3.0,
+    skip_step=0,
+    stg_blocks=[29],
+)
 AUDIO_SAMPLE_RATE = 24000
 
 

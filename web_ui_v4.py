@@ -186,9 +186,10 @@ def process_job_logic(job):
         "--num-inference-steps", str(int(job['steps'])),
         "--seed", str(int(seed)),
         # "--enable-chunked-stage2"
+        "--quantization", "fp8-cast"
     ]
 
-    if job['enable_fp8']: cmd.append("--enable-fp8")
+    #if job['enable_fp8']: cmd.append("--quantization fp8-cast")
     if job['enhance_prompt']: cmd.append("--enhance-prompt")
     if job['disable_audio']: cmd.append("--disable-audio")
 

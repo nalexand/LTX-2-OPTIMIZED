@@ -4,7 +4,7 @@ from collections.abc import Iterator
 import torch
 
 from ltx_core.components.diffusion_steps import EulerDiffusionStep
-from ltx_core.components.guiders import CFGGuider
+from ltx_core.components.guiders import MultiModalGuider, MultiModalGuiderParams
 from ltx_core.components.noisers import GaussianNoiser
 from ltx_core.components.protocols import DiffusionStepProtocol
 from ltx_core.components.schedulers import LTX2Scheduler
@@ -13,6 +13,7 @@ from ltx_core.model.audio_vae import decode_audio as vae_decode_audio
 from ltx_core.model.upsampler import upsample_video
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.model.video_vae import decode_video as vae_decode_video
+from ltx_core.quantization import QuantizationPolicy
 from ltx_core.text_encoders.gemma import encode_text
 from ltx_core.types import LatentState, VideoPixelShape
 from ltx_pipelines.utils import ModelLedger
@@ -28,8 +29,8 @@ from ltx_pipelines.utils.helpers import (
     euler_denoising_loop,
     generate_enhanced_prompt,
     get_device,
-    guider_denoising_func,
     image_conditionings_by_adding_guiding_latent,
+    multi_modal_guider_denoising_func,
     simple_denoising_func,
 )
 from ltx_pipelines.utils.media_io import encode_video
@@ -54,7 +55,7 @@ class KeyframeInterpolationPipeline:
         gemma_root: str,
         loras: list[LoraPathStrengthAndSDOps],
         device: torch.device = device,
-        fp8transformer: bool = False,
+        quantization: QuantizationPolicy | None = None,
     ):
         self.device = device
         self.dtype = torch.bfloat16
@@ -65,7 +66,7 @@ class KeyframeInterpolationPipeline:
             spatial_upsampler_path=spatial_upsampler_path,
             gemma_root_path=gemma_root,
             loras=loras,
-            fp8transformer=fp8transformer,
+            quantization=quantization,
         )
         self.stage_2_model_ledger = self.stage_1_model_ledger.with_loras(
             loras=distilled_lora,
@@ -86,7 +87,8 @@ class KeyframeInterpolationPipeline:
         num_frames: int,
         frame_rate: float,
         num_inference_steps: int,
-        cfg_guidance_scale: float,
+        video_guider_params: MultiModalGuiderParams,
+        audio_guider_params: MultiModalGuiderParams,
         images: list[tuple[str, int, float]],
         tiling_config: TilingConfig | None = None,
         enhance_prompt: bool = False,
@@ -96,7 +98,6 @@ class KeyframeInterpolationPipeline:
         generator = torch.Generator(device=self.device).manual_seed(seed)
         noiser = GaussianNoiser(generator=generator)
         stepper = EulerDiffusionStep()
-        cfg_guider = CFGGuider(cfg_guidance_scale)
         dtype = torch.bfloat16
 
         text_encoder = self.stage_1_model_ledger.text_encoder()
@@ -125,12 +126,17 @@ class KeyframeInterpolationPipeline:
                 video_state=video_state,
                 audio_state=audio_state,
                 stepper=stepper,
-                denoise_fn=guider_denoising_func(
-                    cfg_guider,
-                    v_context_p,
-                    v_context_n,
-                    a_context_p,
-                    a_context_n,
+                denoise_fn=multi_modal_guider_denoising_func(
+                    video_guider=MultiModalGuider(
+                        params=video_guider_params,
+                        negative_context=v_context_n,
+                    ),
+                    audio_guider=MultiModalGuider(
+                        params=audio_guider_params,
+                        negative_context=a_context_n,
+                    ),
+                    v_context=v_context_p,
+                    a_context=a_context_p,
                     transformer=transformer,  # noqa: F821
                 ),
             )
@@ -223,7 +229,8 @@ class KeyframeInterpolationPipeline:
         del video_encoder
         cleanup_memory()
 
-        decoded_video = vae_decode_video(video_state.latent, self.stage_2_model_ledger.video_decoder(), tiling_config)
+        decoded_video = vae_decode_video(video_state.latent, self.stage_2_model_ledger.video_decoder(), tiling_config,
+                                         generator)
         decoded_audio = vae_decode_audio(
             audio_state.latent, self.stage_2_model_ledger.audio_decoder(), self.stage_2_model_ledger.vocoder()
         )
@@ -241,7 +248,7 @@ def main() -> None:
         spatial_upsampler_path=args.spatial_upsampler_path,
         gemma_root=args.gemma_root,
         loras=args.lora,
-        fp8transformer=args.enable_fp8,
+        quantization=args.quantization,
     )
     tiling_config = TilingConfig.default()
     video_chunks_number = get_video_chunks_number(args.num_frames, tiling_config)
@@ -254,7 +261,22 @@ def main() -> None:
         num_frames=args.num_frames,
         frame_rate=args.frame_rate,
         num_inference_steps=args.num_inference_steps,
-        cfg_guidance_scale=args.cfg_guidance_scale,
+        video_guider_params=MultiModalGuiderParams(
+            cfg_scale=args.video_cfg_guidance_scale,
+            stg_scale=args.video_stg_guidance_scale,
+            rescale_scale=args.video_rescale_scale,
+            modality_scale=args.a2v_guidance_scale,
+            skip_step=args.video_skip_step,
+            stg_blocks=args.video_stg_blocks,
+        ),
+        audio_guider_params=MultiModalGuiderParams(
+            cfg_scale=args.audio_cfg_guidance_scale,
+            stg_scale=args.audio_stg_guidance_scale,
+            rescale_scale=args.audio_rescale_scale,
+            modality_scale=args.v2a_guidance_scale,
+            skip_step=args.audio_skip_step,
+            stg_blocks=args.audio_stg_blocks,
+        ),
         images=args.images,
         tiling_config=tiling_config,
     )
