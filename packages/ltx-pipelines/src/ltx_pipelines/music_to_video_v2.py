@@ -21,20 +21,18 @@ from ltx_core.model.upsampler import upsample_video
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.model.video_vae import decode_video as vae_decode_video
 from ltx_core.quantization import QuantizationPolicy
-from ltx_core.text_encoders.gemma import encode_text
-from ltx_core.types import AudioLatentShape, LatentState, VideoPixelShape
-from ltx_pipelines.utils import ModelLedger
+from ltx_core.types import Audio, AudioLatentShape, LatentState, VideoPixelShape
+from ltx_pipelines.utils import ModelLedger, euler_denoising_loop
 from ltx_pipelines.utils.args import default_2_stage_music_arg_parser
 from ltx_pipelines.utils.constants import STAGE_2_DISTILLED_SIGMA_VALUES
 from ltx_pipelines.utils.helpers import (
     assert_resolution,
     cleanup_memory,
+    combined_image_conditionings,
     denoise_audio_video,
-    euler_denoising_loop,
-    generate_enhanced_prompt,
+    encode_prompts,
     get_device,
     multi_modal_guider_denoising_func,
-    image_conditionings_by_replacing_latent,
     simple_denoising_func,
     noise_audio_state
 )
@@ -118,7 +116,7 @@ class MusicToVideoTwoStagesPipeline:
         mel_bins = 64
         
         audio_processor = AudioProcessor(
-            sample_rate=AUDIO_SAMPLE_RATE,
+            target_sample_rate=AUDIO_SAMPLE_RATE,
             mel_bins=mel_bins,
             mel_hop_length=mel_hop_length,
             n_fft=n_fft
@@ -134,7 +132,7 @@ class MusicToVideoTwoStagesPipeline:
         elif waveform.shape[1] > 2:
             waveform = waveform[:, :2, :]
             
-        spectrogram = audio_processor.waveform_to_mel(waveform.to(self.device).float(), AUDIO_SAMPLE_RATE)
+        spectrogram = audio_processor.waveform_to_mel(Audio(waveform=waveform.to(self.device).float(), sampling_rate=AUDIO_SAMPLE_RATE))
         audio_encoder = self.stage_1_model_ledger.audio_encoder()
         encoded_latents = audio_encoder(spectrogram.to(self.dtype))
 
@@ -211,33 +209,26 @@ class MusicToVideoTwoStagesPipeline:
         if os.path.exists(cache_path):
             print(f"Disk cache hit! Loading embeddings from {cache_path}")
             try:
-                cached_data = torch.load(cache_path, map_location=self.device)
+                cached_data = torch.load(cache_path, map_location=self.device, weights_only=False)
                 context_p, context_n = cached_data
             except Exception as e:
                 print(f"Failed to load cache (corrupted?): {e}. Regenerating.")
 
         if context_p is None:
             print("Disk cache miss. Running text encoder.")
-            text_encoder = self.stage_1_model_ledger.text_encoder()
-
-            current_prompt = prompt
-            if enhance_prompt:
-                current_prompt = generate_enhanced_prompt(
-                    text_encoder, prompt, images[0][0] if len(images) > 0 else None, seed=seed
-                )
-
-            context_p, context_n = encode_text(text_encoder, prompts=[current_prompt, negative_prompt])
+            (context_p, context_n) = encode_prompts(
+                [prompt],
+                self.stage_1_model_ledger,
+                enhance_first_prompt=enhance_prompt,
+                enhance_prompt_image=images[0][0] if len(images) > 0 else None,
+            )
 
             print(f"Saving embeddings to {cache_path}")
             torch.save((context_p, context_n), cache_path)
-
-            torch.cuda.synchronize()
-            del text_encoder
-            cleanup_memory()
         # --- DISK CACHE LOGIC END ---
 
-        v_context_p, a_context_p = context_p
-        v_context_n, a_context_n = context_n
+        v_context_p, a_context_p = context_p.video_encoding, context_p.audio_encoding
+        v_context_n, a_context_n = context_n.video_encoding, context_n.audio_encoding
         print("end text encoder", time.time() - startAt)
 
         print("Stage 1: Initial low resolution video generation.", time.time() - startAt)
@@ -326,7 +317,7 @@ class MusicToVideoTwoStagesPipeline:
 
         stage_1_conditionings = []
         if images:
-            stage_1_conditionings = image_conditionings_by_replacing_latent(
+            stage_1_conditionings = combined_image_conditionings(
                 images=images,
                 height=stage_1_output_shape.height,
                 width=stage_1_output_shape.width,
@@ -372,7 +363,6 @@ class MusicToVideoTwoStagesPipeline:
                 video=decoded_video,
                 fps=fps,
                 audio=audio_waveform.cpu() if audio_waveform is not None else decoded_audio,
-                audio_sample_rate=AUDIO_SAMPLE_RATE,
                 output_path=output_path.replace('.mp4', '_.mp4'),
                 video_chunks_number=video_chunks_number,
             )
@@ -389,7 +379,7 @@ class MusicToVideoTwoStagesPipeline:
         stage_2_output_shape = VideoPixelShape(batch=1, frames=num_frames, width=width, height=height, fps=frame_rate)
         stage_2_conditionings = []
         if images:
-            stage_2_conditionings = image_conditionings_by_replacing_latent(
+            stage_2_conditionings = combined_image_conditionings(
                 images=images,
                 height=stage_2_output_shape.height,
                 width=stage_2_output_shape.width,
@@ -474,7 +464,7 @@ def main() -> None:
     args = parser.parse_args()
     
     pipeline = MusicToVideoTwoStagesPipeline(
-        checkpoint_path=args.checkpoint_path,
+        checkpoint_path=args.distilled_checkpoint_path,
         stage_2_checkpoint_path=args.stage_2_checkpoint_path,
         spatial_upsampler_path=args.spatial_upsampler_path,
         gemma_root=args.gemma_root,
@@ -522,7 +512,6 @@ def main() -> None:
         video=video,
         fps=args.frame_rate,
         audio=audio,
-        audio_sample_rate=AUDIO_SAMPLE_RATE,
         output_path=args.output_path,
         video_chunks_number=video_chunks_number,
     )

@@ -1,22 +1,24 @@
 import argparse
 from pathlib import Path
+from typing import NamedTuple
 
 from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
 from ltx_core.quantization import QuantizationPolicy
 from ltx_pipelines.utils.constants import (
-    DEFAULT_1_STAGE_HEIGHT,
-    DEFAULT_1_STAGE_WIDTH,
-    DEFAULT_2_STAGE_HEIGHT,
-    DEFAULT_2_STAGE_WIDTH,
-    DEFAULT_AUDIO_GUIDER_PARAMS,
-    DEFAULT_FRAME_RATE,
+    DEFAULT_IMAGE_CRF,
     DEFAULT_LORA_STRENGTH,
     DEFAULT_NEGATIVE_PROMPT,
-    DEFAULT_NUM_FRAMES,
-    DEFAULT_NUM_INFERENCE_STEPS,
-    DEFAULT_SEED,
-    DEFAULT_VIDEO_GUIDER_PARAMS,
+    LTX_2_3_HQ_PARAMS,
+    LTX_2_3_PARAMS,
+    PipelineParams,
 )
+
+
+class ImageConditioningInput(NamedTuple):
+    path: str
+    frame_idx: int
+    strength: float
+    crf: int = DEFAULT_IMAGE_CRF
 
 
 class VideoConditioningAction(argparse.Action):
@@ -35,20 +37,50 @@ class VideoConditioningAction(argparse.Action):
         setattr(namespace, self.dest, current)
 
 
+class VideoMaskConditioningAction(argparse.Action):
+    """Parse ``--conditioning-attention-mask PATH STRENGTH``.
+    Stores a ``(mask_path, strength)`` tuple on the namespace.  The mask video
+    should be grayscale with pixel values in [0, 1] controlling per-region
+    conditioning attention strength.  The scalar *STRENGTH* is multiplied with
+    the spatial mask before it is applied.
+    """
+
+    def __call__(
+            self,
+            parser: argparse.ArgumentParser,  # noqa: ARG002
+            namespace: argparse.Namespace,
+            values: list[str],
+            option_string: str | None = None,
+    ) -> None:
+        if len(values) != 2:
+            msg = f"{option_string} requires exactly 2 arguments (MASK_PATH STRENGTH), got {len(values)}"
+            raise argparse.ArgumentError(self, msg)
+
+        mask_path = resolve_path(values[0])
+        strength = float(values[1])
+        setattr(namespace, self.dest, (mask_path, strength))
+
+
 class ImageAction(argparse.Action):
     def __call__(
         self,
         parser: argparse.ArgumentParser,  # noqa: ARG002
         namespace: argparse.Namespace,
         values: list[str],
-        option_string: str | None = None,  # noqa: ARG002
+        option_string: str | None = None,
     ) -> None:
-        path, frame_idx, strength_str = values
-        resolved_path = resolve_path(path)
-        frame_idx = int(frame_idx)
-        strength = float(strength_str)
+        if len(values) not in (3, 4):
+            msg = f"{option_string} requires 3 or 4 arguments (PATH FRAME_IDX STRENGTH [CRF]), got {len(values)}"
+            raise argparse.ArgumentError(self, msg)
+
+        conditioning = ImageConditioningInput(
+            path=resolve_path(values[0]),
+            frame_idx=int(values[1]),
+            strength=float(values[2]),
+            crf=int(values[3]) if len(values) > 3 else DEFAULT_IMAGE_CRF,
+        )
         current = getattr(namespace, self.dest) or []
-        current.append((resolved_path, frame_idx, strength))
+        current.append(conditioning)
         setattr(namespace, self.dest, current)
 
 
@@ -113,14 +145,34 @@ class QuantizationAction(argparse.Action):
         setattr(namespace, self.dest, policy)
 
 
-def basic_arg_parser() -> argparse.ArgumentParser:
+def detect_checkpoint_path(distilled: bool = False) -> str:
+    """Pre-parse argv to extract the checkpoint path before building the full parser."""
+    pre = argparse.ArgumentParser(add_help=False)
+    flag = "--distilled-checkpoint-path" if distilled else "--checkpoint-path"
+    pre.add_argument(flag, type=resolve_path, required=True)
+    known, _ = pre.parse_known_args()
+    return known.distilled_checkpoint_path if distilled else known.checkpoint_path
+
+
+def basic_arg_parser(
+    params: PipelineParams = LTX_2_3_PARAMS,
+    distilled: bool = False,
+) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--checkpoint-path",
-        type=resolve_path,
-        required=True,
-        help="Path to LTX-2 model checkpoint (.safetensors file).",
-    )
+    if distilled:
+        parser.add_argument(
+            "--distilled-checkpoint-path",
+            type=resolve_path,
+            required=True,
+            help="Path to LTX-2 distilled model checkpoint (.safetensors file).",
+        )
+    else:
+        parser.add_argument(
+            "--checkpoint-path",
+            type=resolve_path,
+            required=True,
+            help="Path to LTX-2 model checkpoint (.safetensors file).",
+        )
     parser.add_argument(
         "--gemma-root",
         type=resolve_path,
@@ -142,58 +194,57 @@ def basic_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed",
         type=int,
-        default=DEFAULT_SEED,
-        help=(
-            f"Random seed value used to initialize the noise tensor for "
-            f"reproducible generation (default: {DEFAULT_SEED})."
-        ),
+        default=params.seed,
+        help=f"Random seed for reproducible generation (default: {params.seed}).",
     )
     parser.add_argument(
         "--height",
         type=int,
-        default=DEFAULT_1_STAGE_HEIGHT,
-        help=f"Height of the generated video in pixels, should be divisible by 32 (default: {DEFAULT_1_STAGE_HEIGHT}).",
+        default=params.stage_1_height,
+        help=f"Video height in pixels, divisible by 32 (default: {params.stage_1_height}).",
     )
     parser.add_argument(
         "--width",
         type=int,
-        default=DEFAULT_1_STAGE_WIDTH,
-        help=f"Width of the generated video in pixels, should be divisible by 32 (default: {DEFAULT_1_STAGE_WIDTH}).",
+        default=params.stage_1_width,
+        help=f"Width of the generated video in pixels, should be divisible by 32 (default: {params.stage_1_width}).",
     )
     parser.add_argument(
         "--num-frames",
         type=int,
-        default=DEFAULT_NUM_FRAMES,
+        default=params.num_frames,
         help=f"Number of frames to generate in the output video sequence, num-frames = (8 x K) + 1, "
-        f"where k is a non-negative integer (default: {DEFAULT_NUM_FRAMES}).",
+        f"where k is a non-negative integer (default: {params.num_frames}).",
     )
     parser.add_argument(
         "--frame-rate",
         type=float,
-        default=DEFAULT_FRAME_RATE,
-        help=f"Frame rate of the generated video (fps) (default: {DEFAULT_FRAME_RATE}).",
+        default=params.frame_rate,
+        help=f"Frame rate of the generated video (fps) (default: {params.frame_rate}).",
     )
     parser.add_argument(
         "--num-inference-steps",
         type=int,
-        default=DEFAULT_NUM_INFERENCE_STEPS,
+        default=params.num_inference_steps,
         help=(
             f"Number of denoising steps in the diffusion sampling process. "
-            f"Higher values improve quality but increase generation time (default: {DEFAULT_NUM_INFERENCE_STEPS})."
+            f"Higher values improve quality but increase generation time (default: {params.num_inference_steps})."
         ),
     )
     parser.add_argument(
         "--image",
         dest="images",
         action=ImageAction,
-        nargs=3,
-        metavar=("PATH", "FRAME_IDX", "STRENGTH"),
+        nargs="+",
+        metavar="ARG",
         default=[],
         help=(
-            "Image conditioning input: path to image file, target frame index, "
-            "and conditioning strength (all three required). Default: empty list [] (no image conditioning). "
+            "Image conditioning input: PATH FRAME_IDX STRENGTH [CRF]. "
+            "PATH is the image file, FRAME_IDX is the target frame index, "
+            "STRENGTH is the conditioning strength (all three required). "
+            f"CRF is the optional H.264 compression quality (0=lossless, default: {DEFAULT_IMAGE_CRF}). "
             "Can be specified multiple times. Example: --image path/to/image1.jpg 0 0.8 "
-            "--image path/to/image2.jpg 160 0.9"
+            "--image path/to/image2.jpg 160 0.9 0"
         ),
     )
     parser.add_argument(
@@ -228,8 +279,10 @@ def basic_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def default_1_stage_arg_parser() -> argparse.ArgumentParser:
-    parser = basic_arg_parser()
+def default_1_stage_arg_parser(params: PipelineParams = LTX_2_3_PARAMS) -> argparse.ArgumentParser:
+    video_guider = params.video_guider_params
+    audio_guider = params.audio_guider_params
+    parser = basic_arg_parser(params=params)
     parser.add_argument(
         "--negative-prompt",
         type=str,
@@ -243,140 +296,140 @@ def default_1_stage_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--video-cfg-guidance-scale",
         type=float,
-        default=DEFAULT_VIDEO_GUIDER_PARAMS.cfg_scale,
+        default=video_guider.cfg_scale,
         help=(
             f"Classifier-free guidance (CFG) scale controlling how strongly "
             f"the model adheres to the video prompt. Higher values increase prompt "
-            "adherence but may reduce diversity. 1.0 means no effect "
-            f"(default: {DEFAULT_VIDEO_GUIDER_PARAMS.cfg_scale})."
+            f"adherence but may reduce diversity. 1.0 means no effect "
+            f"(default: {video_guider.cfg_scale})."
         ),
     )
     parser.add_argument(
         "--video-stg-guidance-scale",
         type=float,
-        default=DEFAULT_VIDEO_GUIDER_PARAMS.stg_scale,
+        default=video_guider.stg_scale,
         help=(
             f"STG (Spatio-Temporal Guidance) scale controlling how strongly "
             f"the model reacts to the perturbation of the video modality. Higher values increase "
             f"the effect but may reduce quality. 0.0 means no effect "
-            f"(default: {DEFAULT_VIDEO_GUIDER_PARAMS.stg_scale})."
+            f"(default: {video_guider.stg_scale})."
         ),
     )
     parser.add_argument(
         "--video-rescale-scale",
         type=float,
-        default=DEFAULT_VIDEO_GUIDER_PARAMS.rescale_scale,
+        default=video_guider.rescale_scale,
         help=(
             f"Rescale scale controlling how strongly "
             f"the model rescales the video modality after applying other guidance. Higher values tend to decrease "
-            f"oversaturation effects. 0.0 means no effect (default: {DEFAULT_VIDEO_GUIDER_PARAMS.rescale_scale})."
+            f"oversaturation effects. 0.0 means no effect (default: {video_guider.rescale_scale})."
         ),
     )
     parser.add_argument(
         "--video-stg-blocks",
         type=int,
         nargs="*",
-        default=DEFAULT_VIDEO_GUIDER_PARAMS.stg_blocks,
-        help=(f"Which transformer blocks to perturb for STG. Default: {DEFAULT_VIDEO_GUIDER_PARAMS.stg_blocks}."),
+        default=video_guider.stg_blocks,
+        help=(f"Which transformer blocks to perturb for STG. Default: {video_guider.stg_blocks}."),
     )
     parser.add_argument(
         "--a2v-guidance-scale",
         type=float,
-        default=DEFAULT_VIDEO_GUIDER_PARAMS.modality_scale,
+        default=video_guider.modality_scale,
         help=(
             f"A2V (Audio-to-Video) guidance scale controlling how strongly "
             f"the model reacts to the perturbation of the audio-to-video cross-attention. Higher values may increase "
-            f"lipsync quality. 1.0 means no effect (default: {DEFAULT_VIDEO_GUIDER_PARAMS.modality_scale})."
+            f"lipsync quality. 1.0 means no effect (default: {video_guider.modality_scale})."
         ),
     )
     parser.add_argument(
         "--video-skip-step",
         type=int,
-        default=DEFAULT_VIDEO_GUIDER_PARAMS.skip_step,
+        default=video_guider.skip_step,
         help=(
             "Video skip step N controls periodic skipping during the video diffusion process: "
             "only steps where step_index % (N + 1) == 0 are processed, all others are skipped "
             f"(e.g., 0 = no skipping; 1 = skip every other step; 2 = skip 2 of every 3 steps; "
-            f"default: {DEFAULT_VIDEO_GUIDER_PARAMS.skip_step})."
+            f"default: {video_guider.skip_step})."
         ),
     )
     parser.add_argument(
         "--audio-cfg-guidance-scale",
         type=float,
-        default=DEFAULT_AUDIO_GUIDER_PARAMS.cfg_scale,
+        default=audio_guider.cfg_scale,
         help=(
             f"Audio CFG (Classifier-free guidance) scale controlling how strongly "
             f"the model adheres to the audio prompt. Higher values increase prompt "
             f"adherence but may reduce diversity. 1.0 means no effect "
-            f"(default: {DEFAULT_AUDIO_GUIDER_PARAMS.cfg_scale})."
+            f"(default: {audio_guider.cfg_scale})."
         ),
     )
     parser.add_argument(
         "--audio-stg-guidance-scale",
         type=float,
-        default=DEFAULT_AUDIO_GUIDER_PARAMS.stg_scale,
+        default=audio_guider.stg_scale,
         help=(
             f"Audio STG (Spatio-Temporal Guidance) scale controlling how strongly "
             f"the model reacts to the perturbation of the audio modality. Higher values increase "
             f"the effect but may reduce quality. 0.0 means no effect "
-            f"(default: {DEFAULT_AUDIO_GUIDER_PARAMS.stg_scale})."
+            f"(default: {audio_guider.stg_scale})."
         ),
     )
     parser.add_argument(
         "--audio-rescale-scale",
         type=float,
-        default=DEFAULT_AUDIO_GUIDER_PARAMS.rescale_scale,
+        default=audio_guider.rescale_scale,
         help=(
             f"Audio rescale scale controlling how strongly "
             f"the model rescales the audio modality after applying other guidance. "
-            f"Experimental. 0.0 means no effect (default: {DEFAULT_AUDIO_GUIDER_PARAMS.rescale_scale})."
+            f"Experimental. 0.0 means no effect (default: {audio_guider.rescale_scale})."
         ),
     )
     parser.add_argument(
         "--audio-stg-blocks",
         type=int,
         nargs="*",
-        default=DEFAULT_AUDIO_GUIDER_PARAMS.stg_blocks,
-        help=(f"Which transformer blocks to perturb for Audio STG. Default: {DEFAULT_AUDIO_GUIDER_PARAMS.stg_blocks}."),
+        default=audio_guider.stg_blocks,
+        help=(f"Which transformer blocks to perturb for Audio STG. Default: {audio_guider.stg_blocks}."),
     )
     parser.add_argument(
         "--v2a-guidance-scale",
         type=float,
-        default=DEFAULT_AUDIO_GUIDER_PARAMS.modality_scale,
+        default=audio_guider.modality_scale,
         help=(
             f"V2A (Video-to-Audio) guidance scale controlling how strongly "
             f"the model reacts to the perturbation of the video-to-audio cross-attention. Higher values may increase "
-            f"lipsync quality. 1.0 means no effect (default: {DEFAULT_AUDIO_GUIDER_PARAMS.modality_scale})."
+            f"lipsync quality. 1.0 means no effect (default: {audio_guider.modality_scale})."
         ),
     )
     parser.add_argument(
         "--audio-skip-step",
         type=int,
-        default=DEFAULT_AUDIO_GUIDER_PARAMS.skip_step,
+        default=audio_guider.skip_step,
         help=(
             "Audio skip step N controls periodic skipping during the audio diffusion process: "
             "only steps where step_index % (N + 1) == 0 are processed, all others are skipped "
             f"(e.g., 0 = no skipping; 1 = skip every other step; 2 = skip 2 of every 3 steps; "
-            f"default: {DEFAULT_AUDIO_GUIDER_PARAMS.skip_step})."
+            f"default: {audio_guider.skip_step})."
         ),
     )
 
     return parser
 
 
-def default_2_stage_arg_parser() -> argparse.ArgumentParser:
-    parser = default_1_stage_arg_parser()
-    parser.set_defaults(height=DEFAULT_2_STAGE_HEIGHT, width=DEFAULT_2_STAGE_WIDTH)
+def default_2_stage_arg_parser(params: PipelineParams = LTX_2_3_PARAMS) -> argparse.ArgumentParser:
+    parser = default_1_stage_arg_parser(params=params)
+    parser.set_defaults(height=params.stage_2_height, width=params.stage_2_width)
     # Update help text to reflect 2-stage defaults
     for action in parser._actions:
         if "--height" in action.option_strings:
             action.help = (
                 f"Height of the generated video in pixels, should be divisible by 64 "
-                f"(default: {DEFAULT_2_STAGE_HEIGHT})."
+                f"(default: {params.stage_2_height})."
             )
         if "--width" in action.option_strings:
             action.help = (
-                f"Width of the generated video in pixels, should be divisible by 64 (default: {DEFAULT_2_STAGE_WIDTH})."
+                f"Width of the generated video in pixels, should be divisible by 64 (default: {params.stage_2_width})."
             )
     parser.add_argument(
         "--distilled-lora",
@@ -406,19 +459,36 @@ def default_2_stage_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def default_2_stage_distilled_arg_parser() -> argparse.ArgumentParser:
-    parser = basic_arg_parser()
-    parser.set_defaults(height=DEFAULT_2_STAGE_HEIGHT, width=DEFAULT_2_STAGE_WIDTH)
+def hq_2_stage_arg_parser(params: PipelineParams = LTX_2_3_HQ_PARAMS) -> argparse.ArgumentParser:
+    parser = default_2_stage_arg_parser(params=params)
+    parser.add_argument(
+        "--distilled-lora-strength-stage-1",
+        type=float,
+        default=0.25,
+        help=(f"Strength of the distilled LoRA used in the first stage (default: {0.25})."),
+    )
+    parser.add_argument(
+        "--distilled-lora-strength-stage-2",
+        type=float,
+        default=0.5,
+        help=(f"Strength of the distilled LoRA used in the second stage (default: {0.5})."),
+    )
+    return parser
+
+
+def default_2_stage_distilled_arg_parser(params: PipelineParams = LTX_2_3_PARAMS) -> argparse.ArgumentParser:
+    parser = basic_arg_parser(params=params, distilled=True)
+    parser.set_defaults(height=params.stage_2_height, width=params.stage_2_width)
     # Update help text to reflect 2-stage defaults
     for action in parser._actions:
         if "--height" in action.option_strings:
             action.help = (
                 f"Height of the generated video in pixels, should be divisible by 64 "
-                f"(default: {DEFAULT_2_STAGE_HEIGHT})."
+                f"(default: {params.stage_2_height})."
             )
         if "--width" in action.option_strings:
             action.help = (
-                f"Width of the generated video in pixels, should be divisible by 64 (default: {DEFAULT_2_STAGE_WIDTH})."
+                f"Width of the generated video in pixels, should be divisible by 64 (default: {params.stage_2_width})."
             )
     parser.add_argument(
         "--spatial-upsampler-path",
@@ -432,19 +502,19 @@ def default_2_stage_distilled_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def default_2_stage_music_arg_parser() -> argparse.ArgumentParser:
+def default_2_stage_music_arg_parser(params: PipelineParams = LTX_2_3_PARAMS) -> argparse.ArgumentParser:
     parser = default_1_stage_arg_parser()
-    parser.set_defaults(height=DEFAULT_2_STAGE_HEIGHT, width=DEFAULT_2_STAGE_WIDTH)
+    parser.set_defaults(height=params.stage_2_height, width=params.stage_2_width)
     
     for action in parser._actions:
         if "--height" in action.option_strings:
             action.help = (
                 f"Height of the generated video in pixels, should be divisible by 64 "
-                f"(default: {DEFAULT_2_STAGE_HEIGHT})."
+                f"(default: {params.stage_2_height})."
             )
         if "--width" in action.option_strings:
             action.help = (
-                f"Width of the generated video in pixels, should be divisible by 64 (default: {DEFAULT_2_STAGE_WIDTH})."
+                f"Width of the generated video in pixels, should be divisible by 64 (default: {params.stage_2_width})."
             )
             
     parser.add_argument(

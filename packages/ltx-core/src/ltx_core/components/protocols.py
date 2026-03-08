@@ -97,5 +97,5 @@ class DiffusionStepProtocol(Protocol):
     """
 
     def step(
-        self, sample: torch.Tensor, denoised_sample: torch.Tensor, sigmas: torch.Tensor, step_index: int
+        self, sample: torch.Tensor, denoised_sample: torch.Tensor, sigmas: torch.Tensor, step_index: int, **kwargs
     ) -> torch.Tensor: ...

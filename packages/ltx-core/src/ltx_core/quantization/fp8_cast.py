@@ -74,16 +74,25 @@ def _replace_fwd_with_upcast(layer: torch.nn.Linear, with_stochastic_rounding: b
 
     layer.original_forward = layer.forward
 
-    def new_linear_forward(*args, **_kwargs) -> torch.Tensor:
+    def new_linear_forward(*args, **_kwargs) -> torch.Tensor: # todo move to cuda before upcast
         # assume first arg is the input tensor
         x = args[0]
-        w_up = _upcast_and_round(layer.weight, x.dtype, with_stochastic_rounding, seed)
-        b_up = None
 
+        if layer.weight.device != torch.cuda:
+            w_up_cuda = layer.weight.to("cuda")
+        else:
+            w_up_cuda = layer.weight
+        w_up_cuda = _upcast_and_round(w_up_cuda, x.dtype, with_stochastic_rounding, seed)
+
+        b_up_cuda = None
         if layer.bias is not None:
-            b_up = _upcast_and_round(layer.bias, x.dtype, with_stochastic_rounding, seed)
+            if layer.bias != torch.cuda:
+                b_up_cuda = layer.bias.to("cuda")
+            else:
+                b_up_cuda = layer.bias
+            b_up_cuda = _upcast_and_round(b_up_cuda, x.dtype, with_stochastic_rounding, seed)
 
-        return torch.nn.functional.linear(x, w_up, b_up)
+        return torch.nn.functional.linear(x, w_up_cuda, b_up_cuda)
 
     layer.forward = new_linear_forward
 
@@ -106,39 +115,39 @@ TRANSFORMER_LINEAR_DOWNCAST_MAP = (
     .with_kv_operation(
         key_prefix="transformer_blocks.", key_suffix=".to_q.weight", operation=_naive_weight_or_bias_downcast
     )
-    .with_kv_operation(
-        key_prefix="transformer_blocks.", key_suffix=".to_q.bias", operation=_naive_weight_or_bias_downcast
-    )
+    #.with_kv_operation(
+    #    key_prefix="transformer_blocks.", key_suffix=".to_q.bias", operation=_naive_weight_or_bias_downcast
+    #)
     .with_kv_operation(
         key_prefix="transformer_blocks.", key_suffix=".to_k.weight", operation=_naive_weight_or_bias_downcast
     )
-    .with_kv_operation(
-        key_prefix="transformer_blocks.", key_suffix=".to_k.bias", operation=_naive_weight_or_bias_downcast
-    )
+    #.with_kv_operation(
+    #    key_prefix="transformer_blocks.", key_suffix=".to_k.bias", operation=_naive_weight_or_bias_downcast
+    #)
     .with_kv_operation(
         key_prefix="transformer_blocks.", key_suffix=".to_v.weight", operation=_naive_weight_or_bias_downcast
     )
-    .with_kv_operation(
-        key_prefix="transformer_blocks.", key_suffix=".to_v.bias", operation=_naive_weight_or_bias_downcast
-    )
+    #.with_kv_operation(
+    #    key_prefix="transformer_blocks.", key_suffix=".to_v.bias", operation=_naive_weight_or_bias_downcast
+    #)
     .with_kv_operation(
         key_prefix="transformer_blocks.", key_suffix=".to_out.0.weight", operation=_naive_weight_or_bias_downcast
     )
+    #.with_kv_operation(
+    #    key_prefix="transformer_blocks.", key_suffix=".to_out.0.bias", operation=_naive_weight_or_bias_downcast
+    #)
     .with_kv_operation(
-        key_prefix="transformer_blocks.", key_suffix=".to_out.0.bias", operation=_naive_weight_or_bias_downcast
+        key_prefix="transformer_blocks.", key_suffix="ff.net.0.proj.weight", operation=_naive_weight_or_bias_downcast
     )
+    #.with_kv_operation(
+    #    key_prefix="transformer_blocks.", key_suffix="ff.net.0.proj.bias", operation=_naive_weight_or_bias_downcast
+    #)
     .with_kv_operation(
-        key_prefix="transformer_blocks.", key_suffix=".ff.net.0.proj.weight", operation=_naive_weight_or_bias_downcast
+        key_prefix="transformer_blocks.", key_suffix="ff.net.2.weight", operation=_naive_weight_or_bias_downcast
     )
-    .with_kv_operation(
-        key_prefix="transformer_blocks.", key_suffix=".ff.net.0.proj.bias", operation=_naive_weight_or_bias_downcast
-    )
-    .with_kv_operation(
-        key_prefix="transformer_blocks.", key_suffix=".ff.net.2.weight", operation=_naive_weight_or_bias_downcast
-    )
-    .with_kv_operation(
-        key_prefix="transformer_blocks.", key_suffix=".ff.net.2.bias", operation=_naive_weight_or_bias_downcast
-    )
+    #.with_kv_operation(
+    #    key_prefix="transformer_blocks.", key_suffix="ff.net.2.bias", operation=_naive_weight_or_bias_downcast
+    #)
 )
 
 UPCAST_DURING_INFERENCE = ModuleOps(

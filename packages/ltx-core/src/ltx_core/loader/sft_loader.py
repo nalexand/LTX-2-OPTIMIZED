@@ -57,7 +57,10 @@ class SafetensorsModelStateDictLoader(StateDictLoader):
 
     def metadata(self, path: str) -> dict:
         with safetensors.safe_open(path, framework="pt") as f:
-            return json.loads(f.metadata()["config"])
+            meta = f.metadata()
+            if meta is None or "config" not in meta:
+                return {}
+            return json.loads(meta["config"])
 
     def load(self, path: str | list[str], sd_ops: SDOps | None = None, device: torch.device | None = None) -> StateDict:
         return self.weight_loader.load(path, sd_ops, device)

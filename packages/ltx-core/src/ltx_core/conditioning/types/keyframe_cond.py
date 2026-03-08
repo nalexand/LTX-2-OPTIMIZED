@@ -2,6 +2,7 @@ import torch
 
 from ltx_core.components.patchifiers import get_pixel_coords
 from ltx_core.conditioning.item import ConditioningItem
+from ltx_core.conditioning.mask_utils import update_attention_mask
 from ltx_core.tools import VideoLatentTools
 from ltx_core.types import LatentState, VideoLatentShape
 
@@ -11,6 +12,11 @@ class VideoConditionByKeyframeIndex(ConditioningItem):
     Conditions video generation on keyframe latents at a specific frame index.
     Appends keyframe tokens to the latent state with positions offset by frame_idx,
     and sets denoise strength according to the strength parameter.
+    To add attention masking, wrap with :class:`ConditioningItemAttentionStrengthWrapper`.
+    Args:
+        keyframes: Keyframe latents [B, C, F, H, W].
+        frame_idx: Frame index offset for positional encoding.
+        strength: Conditioning strength (1.0 = clean, 0.0 = fully denoised).
     """
 
     def __init__(self, keyframes: torch.Tensor, frame_idx: int, strength: float):
@@ -45,9 +51,20 @@ class VideoConditionByKeyframeIndex(ConditioningItem):
             dtype=self.keyframes.dtype,
         )
 
+        new_attention_mask = update_attention_mask(
+            latent_state=latent_state,
+            attention_mask=None,
+            num_noisy_tokens=latent_tools.target_shape.token_count(),
+            num_new_tokens=tokens.shape[1],
+            batch_size=tokens.shape[0],
+            device=self.keyframes.device,
+            dtype=self.keyframes.dtype,
+        )
+
         return LatentState(
             latent=torch.cat([latent_state.latent, tokens], dim=1),
             denoise_mask=torch.cat([latent_state.denoise_mask, denoise_mask], dim=1),
             positions=torch.cat([latent_state.positions, positions], dim=2),
             clean_latent=torch.cat([latent_state.clean_latent, tokens], dim=1),
+            attention_mask=new_attention_mask,
         )

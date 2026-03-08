@@ -4,6 +4,7 @@ import torch
 
 from ltx_core.components.patchifiers import get_pixel_coords
 from ltx_core.conditioning.item import ConditioningItem
+from ltx_core.conditioning.mask_utils import update_attention_mask
 from ltx_core.tools import VideoLatentTools
 from ltx_core.types import LatentState, VideoLatentShape
 
@@ -19,6 +20,7 @@ class VideoConditionByReferenceLatent(ConditioningItem):
     `downscale_factor` scales reference positions to match target coordinates, preserving
     the learned positional relationships. This must match the factor used during training
     (stored in LoRA metadata).
+    To add attention masking, wrap with :class:`ConditioningItemAttentionStrengthWrapper`.
     Args:
         latent: Reference video latents [B, C, F, H, W]
         downscale_factor: Target/reference resolution ratio (e.g., 2 = half-resolution
@@ -70,9 +72,20 @@ class VideoConditionByReferenceLatent(ConditioningItem):
             dtype=self.latent.dtype,
         )
 
+        new_attention_mask = update_attention_mask(
+            latent_state=latent_state,
+            attention_mask=None,
+            num_noisy_tokens=latent_tools.target_shape.token_count(),
+            num_new_tokens=tokens.shape[1],
+            batch_size=tokens.shape[0],
+            device=self.latent.device,
+            dtype=self.latent.dtype,
+        )
+
         return LatentState(
             latent=torch.cat([latent_state.latent, tokens], dim=1),
             denoise_mask=torch.cat([latent_state.denoise_mask, denoise_mask], dim=1),
             positions=torch.cat([latent_state.positions, positions], dim=2),
             clean_latent=torch.cat([latent_state.clean_latent, tokens], dim=1),
+            attention_mask=new_attention_mask,
         )

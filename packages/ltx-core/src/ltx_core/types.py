@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 import torch
@@ -61,6 +61,10 @@ class VideoLatentShape(NamedTuple):
             width=shape[4],
         )
 
+    def token_count(self) -> int:
+        """Number of tokens after patchification with the default patch size of 1."""
+        return self.frames * self.height * self.width
+
     def mask_shape(self) -> "VideoLatentShape":
         return self._replace(channels=1)
 
@@ -104,6 +108,10 @@ class AudioLatentShape(NamedTuple):
 
     def to_torch_shape(self) -> torch.Size:
         return torch.Size([self.batch, self.channels, self.frames, self.mel_bins])
+
+    def token_count(self) -> int:
+        """Number of tokens after patchification."""
+        return self.frames
 
     def mask_shape(self) -> "AudioLatentShape":
         return self._replace(channels=1, mel_bins=1)
@@ -157,6 +165,22 @@ class AudioLatentShape(NamedTuple):
 
 
 @dataclass(frozen=True)
+class Audio:
+    """
+    Container for decoded audio samples and metadata.
+    Attributes:
+        waveform: Audio waveform tensor.
+        sampling_rate: Sampling rate (Hz) of the waveform.
+    """
+
+    waveform: torch.Tensor
+    sampling_rate: int
+
+    def to(self, **kwargs: object) -> "Audio":
+        return replace(self, waveform=self.waveform.to(**kwargs))
+
+
+@dataclass(frozen=True)
 class LatentState:
     """
     State of latents during the diffusion denoising process.
@@ -165,12 +189,15 @@ class LatentState:
         denoise_mask: Mask encoding the denoising strength for each token (1 = full denoising, 0 = no denoising).
         positions: Positional indices for each latent element, used for positional embeddings.
         clean_latent: Initial state of the latent before denoising, may include conditioning latents.
+        attention_mask: Optional 2D self-attention mask of shape (B, T, T). Values in [0, 1] where 1 = full attention,
+            0 = no attention. None means full attention everywhere. Built incrementally by conditioning items.
     """
 
     latent: torch.Tensor
     denoise_mask: torch.Tensor
     positions: torch.Tensor
     clean_latent: torch.Tensor
+    attention_mask: torch.Tensor | None = None
 
     def clone(self) -> "LatentState":
         return LatentState(
@@ -178,4 +205,5 @@ class LatentState:
             denoise_mask=self.denoise_mask.clone(),
             positions=self.positions.clone(),
             clean_latent=self.clean_latent.clone(),
+            attention_mask=self.attention_mask.clone() if self.attention_mask is not None else None,
         )

@@ -320,9 +320,9 @@ class VideoEncoder(nn.Module):
         return self.per_channel_statistics.normalize(means)
 
     def tiled_encode(
-            self,
-            video: torch.Tensor,
-            tiling_config: TilingConfig | None = None,
+        self,
+        video: torch.Tensor,
+        tiling_config: TilingConfig | None = None,
     ) -> torch.Tensor:
         """Encode video to latent using tiled processing of the given video tensor.
         Device Handling:
@@ -405,8 +405,8 @@ class VideoEncoder(nn.Module):
 
 
 def prepare_tiles_for_encoding(
-        video: torch.Tensor,
-        tiling_config: TilingConfig | None = None,
+    video: torch.Tensor,
+    tiling_config: TilingConfig | None = None,
 ) -> List[Tile]:
     """Prepare tiles for VAE encoding.
     Args:
@@ -515,17 +515,21 @@ def _make_decoder_block(
             spatial_padding_mode=spatial_padding_mode,
         )
     elif block_name == "compress_time":
+        out_channels = in_channels // block_config.get("multiplier", 1)
         block = DepthToSpaceUpsample(
             dims=convolution_dimensions,
             in_channels=in_channels,
             stride=(2, 1, 1),
+            out_channels_reduction_factor=block_config.get("multiplier", 1),
             spatial_padding_mode=spatial_padding_mode,
         )
     elif block_name == "compress_space":
+        out_channels = in_channels // block_config.get("multiplier", 1)
         block = DepthToSpaceUpsample(
             dims=convolution_dimensions,
             in_channels=in_channels,
             stride=(1, 2, 2),
+            out_channels_reduction_factor=block_config.get("multiplier", 1),
             spatial_padding_mode=spatial_padding_mode,
         )
     elif block_name == "compress_all":
@@ -585,6 +589,7 @@ class VideoDecoder(nn.Module):
         causal: bool = False,
         timestep_conditioning: bool = False,
         decoder_spatial_padding_mode: PaddingModeType = PaddingModeType.REFLECT,
+        base_channels: int = 128,
     ):
         super().__init__()
 
@@ -612,15 +617,9 @@ class VideoDecoder(nn.Module):
         self.decode_noise_scale = 0.025
         self.decode_timestep = 0.05
 
-        # Compute initial feature_channels by going through blocks in reverse
-        # This determines the channel width at the start of the decoder
-        feature_channels = in_channels
-        for block_name, block_params in list(reversed(decoder_blocks)):
-            block_config = block_params if isinstance(block_params, dict) else {}
-            if block_name == "res_x_y":
-                feature_channels = feature_channels * block_config.get("multiplier", 2)
-            if block_name == "compress_all":
-                feature_channels = feature_channels * block_config.get("multiplier", 1)
+        # LTX VAE decoder architecture uses 3 upsampler blocks with multiplier equals to 2.
+        # Hence the total feature_channels is multiplied by 8 (2^3).
+        feature_channels = base_channels * 8
 
         self.conv_in = make_conv_nd(
             dims=convolution_dimensions,
@@ -675,7 +674,6 @@ class VideoDecoder(nn.Module):
             )
             self.last_scale_shift_table = nn.Parameter(torch.empty(2, feature_channels))
 
-    # def forward(self, sample: torch.Tensor, target_shape) -> torch.Tensor:
     def forward(
         self,
         sample: torch.Tensor,
@@ -964,7 +962,9 @@ class VideoDecoder(nn.Module):
 
         return weights
 
+from line_profiler import profile
 
+@profile
 def decode_video(
     latent: torch.Tensor,
     video_decoder: VideoDecoder,
@@ -1091,15 +1091,15 @@ def make_mapping_operation(
     scale: int,
 ) -> MappingOperation:
     """Create a mapping operation over a set of tiling intervals.
-        The given mapping function is applied to each interval in the input dimension. The result function is used for
-        creating tiles in the output dimension.
-        Args:
-            map_func: Mapping function to create the mapping operation from
-            scale: Scale factor for the transformation, used as an argument for the mapping function
-        Returns:
-            Mapping operation that takes a set of tiling intervals and returns a set of slices and masks in the output
-            dimension.
-        """
+    The given mapping function is applied to each interval in the input dimension. The result function is used for
+    creating tiles in the output dimension.
+    Args:
+        map_func: Mapping function to create the mapping operation from
+        scale: Scale factor for the transformation, used as an argument for the mapping function
+    Returns:
+        Mapping operation that takes a set of tiling intervals and returns a set of slices and masks in the output
+        dimension.
+    """
 
     def map_op(intervals: DimensionIntervals) -> tuple[list[slice], list[torch.Tensor | None]]:
         output_slices: list[slice] = []
@@ -1195,11 +1195,11 @@ def map_spatial_interval_to_pixel(
 
 
 def map_spatial_interval_to_latent(
-        begin: int,
-        end: int,
-        left_ramp: int,
-        right_ramp: int,
-        scale: int,
+    begin: int,
+    end: int,
+    left_ramp: int,
+    right_ramp: int,
+    scale: int,
 ) -> Tuple[slice, torch.Tensor]:
     """Map spatial interval in pixel space to latent space.
        Args:

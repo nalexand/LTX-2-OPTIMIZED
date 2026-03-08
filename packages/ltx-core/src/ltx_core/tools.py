@@ -76,7 +76,13 @@ class LatentTools(Protocol):
         denoise_mask = torch.ones_like(latent_state.denoise_mask)[:, :num_tokens]
         positions = latent_state.positions[:, :, :num_tokens]
 
-        return LatentState(latent=latent, denoise_mask=denoise_mask, positions=positions, clean_latent=clean_latent)
+        return LatentState(
+            latent=latent,
+            denoise_mask=denoise_mask,
+            positions=positions,
+            clean_latent=clean_latent,
+            attention_mask=None,
+        )
 
 
 @dataclass(frozen=True)

@@ -9,9 +9,9 @@ import sys
 from collections import deque
 
 # --- Configuration & Defaults ---
-DEFAULT_CHECKPOINT = "./models/ltx-2-19b-distilled-fp8.safetensors"
+DEFAULT_CHECKPOINT = "./models/ltx-2.3-22b-distilled-fp8.safetensors"
 DEFAULT_GEMMA = "./models/gemma3"
-DEFAULT_UPSAMPLER = "./models/ltx-2-spatial-upscaler-x2-1.0.safetensors"
+DEFAULT_UPSAMPLER = "./models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
 LORA_ROOT = "./models/loras"
 
 # LoRA List
@@ -52,9 +52,9 @@ SHOT_TYPES = ["Wide establishing", "Medium", "Close-up", "Extreme close-up", "Ov
               "High angle", "Overhead"]
 LIGHTING = ["Natural sunlight", "Golden hour", "Cinematic", "Volumetric fog", "Neon glow", "Dark and moody",
             "Studio lighting", "Soft rim light"]
-CAM_MOVES = ["static frame", "wide establishing shot", "over-the-shoulder", "handheld movement", "overhead view", "pushes in", "pulls back",
+CAM_MOVES = ["static frame", "wide establishing shot", "over-the-shoulder", "handheld movement", "overhead view",
+             "pushes in", "pulls back",
              "tilts upward", "circles around", "pans across", "follows", "tracks"]  # ok
-
 
 # Establish the shot. Use cinematography terms that match your preferred film genre. Include aspects like scale or specific category characteristics to further refine the style you’re looking for.
 # Set the scene. Describe lighting conditions, color palette, surface textures, and atmosphere to shape the mood.
@@ -173,8 +173,8 @@ def process_job_logic(job):
     # Build Command
     cmd = [
         sys.executable, "-m", "ltx_pipelines.distilled",
-        #"kernprof", "-l", "-v", "-m", "ltx_pipelines.distilled",
-        "--checkpoint-path", job['checkpoint_path'],
+        # "kernprof", "-l", "-v", "-m", "ltx_pipelines.distilled",
+        "--distilled-checkpoint-path", job['checkpoint_path'],
         "--gemma-root", job['gemma_path'],
         "--spatial-upsampler-path", job['upsampler_path'],
         "--prompt", prompt,
@@ -189,7 +189,6 @@ def process_job_logic(job):
         "--quantization", "fp8-cast"
     ]
 
-    #if job['enable_fp8']: cmd.append("--quantization fp8-cast")
     if job['enhance_prompt']: cmd.append("--enhance-prompt")
     if job['disable_audio']: cmd.append("--disable-audio")
 
@@ -203,6 +202,10 @@ def process_job_logic(job):
     for lora_name in job['loras']:
         lora_full_path = os.path.join(LORA_ROOT, f"{lora_name.lower()}.safetensors")
         cmd.extend(["--lora", lora_full_path, "1.0"])
+
+    import shlex
+    full_command_str = " ".join(shlex.quote(arg) for arg in cmd)
+    CURRENT_LOG += f"Command:\n{full_command_str}\n\n--- OUTPUT LOG ---\n"
 
     # Execution
     try:
@@ -312,7 +315,7 @@ def enqueue_job(
 def update_monitor():
     """Polled by the UI to get latest logs and queue status"""
     global PREVIEW_VIDEO_PATH
-    
+
     # Check for intermediate preview file
     if CURRENT_OUTPUT_PATH and PREVIEW_VIDEO_PATH is None:
         preview_file = CURRENT_OUTPUT_PATH.replace('.mp4', '_.mp4')
@@ -403,7 +406,7 @@ with gr.Blocks(title="LTX-2 Studio + Queue", theme=theme, css=css) as demo:
 
             # Video Output
             out_video = gr.Video(label="Last Completed Video", height=400, autoplay=True)
-            
+
             # Preview Video
             preview_video = gr.Video(label="Stage 1 Preview", height=300, autoplay=True)
 
@@ -411,7 +414,7 @@ with gr.Blocks(title="LTX-2 Studio + Queue", theme=theme, css=css) as demo:
             with gr.Row():
                 generate_btn = gr.Button("➕ Add to Queue", variant="primary", size="lg")
                 cancel_btn = gr.Button("🛑 Cancel Current Job", variant="secondary", size="lg")
-            
+
             add_result_msg = gr.Markdown("")  # Feedback for button click
 
             with gr.Accordion("Console Log", open=True):

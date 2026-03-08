@@ -1,4 +1,5 @@
 import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 import torch
@@ -210,21 +211,42 @@ class MultiModalGuiderParams:
     "Skip step controlling how often the model skips the step."
 
 
+def _params_for_sigma_from_sorted_dict(
+    sigma: float, params_by_sigma: Sequence[tuple[float, MultiModalGuiderParams]]
+) -> MultiModalGuiderParams:
+    """
+    Return params for the given sigma from a sorted (sigma_upper_bound -> params) structure.
+    Keys are sorted descending (bin upper bounds). Bin i is (key_{i+1}, key_i].
+    Get all keys >= sigma; use last in list (smallest such key = upper bound of bin containing sigma),
+    or last entry in the sequence if list is empty (sigma above max key).
+    """
+    if not params_by_sigma:
+        raise ValueError("params_by_sigma must be non-empty")
+    sigma = float(sigma)
+    keys_desc = [k for k, _ in params_by_sigma]
+    keys_ge_sigma = [k for k in keys_desc if k >= sigma]
+    # sigma above all keys: use first bin (max key)
+    key = keys_ge_sigma[-1] if keys_ge_sigma else keys_desc[0]
+    return next(p for k, p in params_by_sigma if k == key)
+
+
 @dataclass(frozen=True)
 class MultiModalGuider:
     """
-    Multi-modal guider.
+    Multi-modal guider with constant params per instance.
+    For sigma-dependent params, use MultiModalGuiderFactory.build_from_sigma(sigma) to
+    obtain a guider for each step.
     """
 
     params: MultiModalGuiderParams
     negative_context: torch.Tensor | None = None
 
     def calculate(
-            self,
-            cond: torch.Tensor,
-            uncond_text: torch.Tensor | float,
-            uncond_perturbed: torch.Tensor | float,
-            uncond_modality: torch.Tensor | float,
+        self,
+        cond: torch.Tensor,
+        uncond_text: torch.Tensor | float,
+        uncond_perturbed: torch.Tensor | float,
+        uncond_modality: torch.Tensor | float,
     ) -> torch.Tensor:
         """
         The guider calculates the guidance delta as (scale - 1) * (cond - uncond) for cfg and modality cfg,
@@ -232,10 +254,10 @@ class MultiModalGuider:
         prediction.
         """
         pred = (
-                cond
-                + (self.params.cfg_scale - 1) * (cond - uncond_text)
-                + self.params.stg_scale * (cond - uncond_perturbed)
-                + (self.params.modality_scale - 1) * (cond - uncond_modality)
+            cond
+            + (self.params.cfg_scale - 1) * (cond - uncond_text)
+            + self.params.stg_scale * (cond - uncond_perturbed)
+            + (self.params.modality_scale - 1) * (cond - uncond_modality)
         )
 
         if self.params.rescale_scale != 0:
@@ -246,31 +268,91 @@ class MultiModalGuider:
         return pred
 
     def do_unconditional_generation(self) -> bool:
-        """
-        Returns True if the guider is doing unconditional generation.
-        """
+        """Returns True if the guider is doing unconditional generation."""
         return not math.isclose(self.params.cfg_scale, 1.0)
 
     def do_perturbed_generation(self) -> bool:
-        """
-        Returns True if the guider is doing perturbed generation.
-        """
+        """Returns True if the guider is doing perturbed generation."""
         return not math.isclose(self.params.stg_scale, 0.0)
 
     def do_isolated_modality_generation(self) -> bool:
-        """
-        Returns True if the guider is doing isolated modality generation.
-        """
+        """Returns True if the guider is doing isolated modality generation."""
         return not math.isclose(self.params.modality_scale, 1.0)
 
     def should_skip_step(self, step: int) -> bool:
-        """
-        Returns True if the guider should skip the step.
-        """
+        """Returns True if the guider should skip the step."""
         if self.params.skip_step == 0:
             return False
-
         return step % (self.params.skip_step + 1) != 0
+
+
+@dataclass(frozen=True)
+class MultiModalGuiderFactory:
+    """
+    Factory that creates a MultiModalGuider for a given sigma.
+    Single source of truth: _params_by_sigma (schedule). Use constant() for
+    one params for all sigma, from_dict() for sigma-binned params.
+    """
+
+    negative_context: torch.Tensor | None = None
+    _params_by_sigma: tuple[tuple[float, MultiModalGuiderParams], ...] = ()
+
+    @classmethod
+    def constant(
+        cls,
+        params: MultiModalGuiderParams,
+        negative_context: torch.Tensor | None = None,
+    ) -> "MultiModalGuiderFactory":
+        """Build a factory with constant params (same guider for all sigma)."""
+        return cls(
+            negative_context=negative_context,
+            _params_by_sigma=((float("inf"), params),),
+        )
+
+    @classmethod
+    def from_dict(
+        cls,
+        sigma_to_params: Mapping[float, MultiModalGuiderParams],
+        negative_context: torch.Tensor | None = None,
+    ) -> "MultiModalGuiderFactory":
+        """
+        Build a factory from a dict of sigma_value -> MultiModalGuiderParams.
+        Keys are sorted descending and used for bin lookup in params(sigma).
+        """
+        if not sigma_to_params:
+            raise ValueError("sigma_to_params must be non-empty")
+        sorted_items = tuple(sorted(sigma_to_params.items(), key=lambda x: x[0], reverse=True))
+        return cls(negative_context=negative_context, _params_by_sigma=sorted_items)
+
+    def params(self, sigma: float | torch.Tensor) -> MultiModalGuiderParams:
+        """Return params effective for the given sigma (getter; single source of truth)."""
+        sigma_val = float(sigma.item() if isinstance(sigma, torch.Tensor) else sigma)
+        return _params_for_sigma_from_sorted_dict(sigma_val, self._params_by_sigma)
+
+    def build_from_sigma(self, sigma: float | torch.Tensor) -> MultiModalGuider:
+        """Return a MultiModalGuider with params effective for the given sigma."""
+        return MultiModalGuider(
+            params=self.params(sigma),
+            negative_context=self.negative_context,
+        )
+
+
+def create_multimodal_guider_factory(
+    params: MultiModalGuiderParams | MultiModalGuiderFactory,
+    negative_context: torch.Tensor | None = None,
+) -> MultiModalGuiderFactory:
+    """
+    Create or return a MultiModalGuiderFactory. Pass constant params for a
+    single-params factory (uses MultiModalGuiderFactory.constant), or an existing
+    MultiModalGuiderFactory. When given a factory, returns it as-is unless
+    negative_context is provided. For sigma-dependent params use
+    MultiModalGuiderFactory.from_dict(...) and pass that as params.
+    """
+    if isinstance(params, MultiModalGuiderFactory):
+        if negative_context is not None and params.negative_context is not negative_context:
+            return MultiModalGuiderFactory.from_dict(dict(params._params_by_sigma), negative_context=negative_context)
+        return params
+    return MultiModalGuiderFactory.constant(params, negative_context=negative_context)
 
 
 def projection_coef(to_project: torch.Tensor, project_onto: torch.Tensor) -> torch.Tensor:

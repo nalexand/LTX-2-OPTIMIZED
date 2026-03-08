@@ -14,20 +14,17 @@ from ltx_core.model.upsampler import upsample_video
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.model.video_vae import decode_video as vae_decode_video
 from ltx_core.quantization import QuantizationPolicy
-from ltx_core.text_encoders.gemma import encode_text
-from ltx_core.types import LatentState, VideoPixelShape
-from ltx_pipelines.utils import ModelLedger
+from ltx_core.types import Audio, LatentState, VideoPixelShape
+from ltx_pipelines.utils import ModelLedger, euler_denoising_loop
 from ltx_pipelines.utils.args import default_2_stage_arg_parser
 from ltx_pipelines.utils.constants import (
-    AUDIO_SAMPLE_RATE,
     STAGE_2_DISTILLED_SIGMA_VALUES,
 )
 from ltx_pipelines.utils.helpers import (
     assert_resolution,
     cleanup_memory,
     denoise_audio_video,
-    euler_denoising_loop,
-    generate_enhanced_prompt,
+    encode_prompts,
     get_device,
     image_conditionings_by_adding_guiding_latent,
     multi_modal_guider_denoising_func,
@@ -92,7 +89,7 @@ class KeyframeInterpolationPipeline:
         images: list[tuple[str, int, float]],
         tiling_config: TilingConfig | None = None,
         enhance_prompt: bool = False,
-    ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
+    ) -> tuple[Iterator[torch.Tensor], Audio]:
         assert_resolution(height=height, width=width, is_two_stage=True)
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -100,18 +97,14 @@ class KeyframeInterpolationPipeline:
         stepper = EulerDiffusionStep()
         dtype = torch.bfloat16
 
-        text_encoder = self.stage_1_model_ledger.text_encoder()
-        if enhance_prompt:
-            prompt = generate_enhanced_prompt(
-                text_encoder, prompt, images[0][0] if len(images) > 0 else None, seed=seed
-            )
-        context_p, context_n = encode_text(text_encoder, prompts=[prompt, negative_prompt])
-        v_context_p, a_context_p = context_p
-        v_context_n, a_context_n = context_n
-
-        torch.cuda.synchronize()
-        del text_encoder
-        cleanup_memory()
+        (context_p, context_n) = encode_prompts(
+            [prompt],
+            self.stage_1_model_ledger,
+            enhance_first_prompt=enhance_prompt,
+            enhance_prompt_image=images[0][0] if len(images) > 0 else None,
+        )
+        v_context_p, a_context_p = context_p.video_encoding, context_p.audio_encoding
+        v_context_n, a_context_n = context_n.video_encoding, context_n.audio_encoding
 
         # Stage 1: Initial low resolution video generation.
         video_encoder = self.stage_1_model_ledger.video_encoder()
@@ -243,7 +236,7 @@ def main() -> None:
     parser = default_2_stage_arg_parser()
     args = parser.parse_args()
     pipeline = KeyframeInterpolationPipeline(
-        checkpoint_path=args.checkpoint_path,
+        checkpoint_path=args.distilled_checkpoint_path,
         distilled_lora=args.distilled_lora,
         spatial_upsampler_path=args.spatial_upsampler_path,
         gemma_root=args.gemma_root,
@@ -285,7 +278,6 @@ def main() -> None:
         video=video,
         fps=args.frame_rate,
         audio=audio,
-        audio_sample_rate=AUDIO_SAMPLE_RATE,
         output_path=args.output_path,
         video_chunks_number=video_chunks_number,
     )

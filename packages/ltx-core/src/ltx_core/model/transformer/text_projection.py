@@ -3,7 +3,8 @@ import torch
 
 class PixArtAlphaTextProjection(torch.nn.Module):
     """
-    Projects caption embeddings. Also handles dropout for classifier-free guidance.
+    Projects caption embeddings using dual linear layers.
+    Flow: linear_1 → activation → linear_2
     Adapted from https://github.com/PixArt-alpha/PixArt-alpha/blob/master/diffusion/model/nets/PixArt_blocks.py
     """
 
@@ -25,3 +26,13 @@ class PixArtAlphaTextProjection(torch.nn.Module):
         hidden_states = self.act_1(hidden_states)
         hidden_states = self.linear_2(hidden_states)
         return hidden_states
+
+
+def create_caption_projection(transformer_config: dict, audio: bool = False) -> PixArtAlphaTextProjection:
+    """Create a caption projection for the transformer (V1/19B only)."""
+    caption_channels = transformer_config["caption_channels"]
+    if audio:
+        inner_dim = transformer_config["audio_num_attention_heads"] * transformer_config["audio_attention_head_dim"]
+    else:
+        inner_dim = transformer_config["num_attention_heads"] * transformer_config["attention_head_dim"]
+    return PixArtAlphaTextProjection(in_features=caption_channels, hidden_size=inner_dim)

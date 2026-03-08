@@ -2,40 +2,49 @@ import logging
 from collections.abc import Iterator
 
 import torch
+from einops import rearrange
 from safetensors import safe_open
 
 from ltx_core.components.diffusion_steps import EulerDiffusionStep
 from ltx_core.components.noisers import GaussianNoiser
 from ltx_core.components.protocols import DiffusionStepProtocol
-from ltx_core.conditioning import ConditioningItem, VideoConditionByReferenceLatent
+from ltx_core.conditioning import (
+    ConditioningItem,
+    ConditioningItemAttentionStrengthWrapper,
+    VideoConditionByReferenceLatent,
+)
 from ltx_core.loader import LoraPathStrengthAndSDOps
 from ltx_core.model.audio_vae import decode_audio as vae_decode_audio
 from ltx_core.model.upsampler import upsample_video
 from ltx_core.model.video_vae import TilingConfig, VideoEncoder, get_video_chunks_number
 from ltx_core.model.video_vae import decode_video as vae_decode_video
 from ltx_core.quantization import QuantizationPolicy
-from ltx_core.text_encoders.gemma import encode_text
-from ltx_core.types import LatentState, VideoPixelShape
-from ltx_pipelines.utils import ModelLedger
-from ltx_pipelines.utils.args import VideoConditioningAction, default_2_stage_distilled_arg_parser
-from ltx_pipelines.utils.constants import (
-    AUDIO_SAMPLE_RATE,
-    DISTILLED_SIGMA_VALUES,
-    STAGE_2_DISTILLED_SIGMA_VALUES,
-)
-from ltx_pipelines.utils.helpers import (
+from ltx_core.types import Audio, LatentState, VideoLatentShape, VideoPixelShape
+from ltx_pipelines.utils import (
+    ModelLedger,
     assert_resolution,
     cleanup_memory,
+    combined_image_conditionings,
     denoise_audio_video,
+    encode_prompts,
     euler_denoising_loop,
-    generate_enhanced_prompt,
     get_device,
-    image_conditionings_by_replacing_latent,
     simple_denoising_func,
+)
+from ltx_pipelines.utils.args import (
+    ImageConditioningInput,
+    VideoConditioningAction,
+    VideoMaskConditioningAction,
+    default_2_stage_distilled_arg_parser,
+    detect_checkpoint_path,
+)
+from ltx_pipelines.utils.constants import (
+    DISTILLED_SIGMA_VALUES,
+    STAGE_2_DISTILLED_SIGMA_VALUES,
+    detect_params,
 )
 from ltx_pipelines.utils.media_io import encode_video, load_video_conditioning
 from ltx_pipelines.utils.types import PipelineComponents
-
 device = get_device()
 
 
@@ -51,7 +60,7 @@ class ICLoraPipeline:
 
     def __init__(
         self,
-        checkpoint_path: str,
+        distilled_checkpoint_path: str,
         spatial_upsampler_path: str,
         gemma_root: str,
         loras: list[LoraPathStrengthAndSDOps],
@@ -62,7 +71,7 @@ class ICLoraPipeline:
         self.stage_1_model_ledger = ModelLedger(
             dtype=self.dtype,
             device=device,
-            checkpoint_path=checkpoint_path,
+            checkpoint_path=distilled_checkpoint_path,
             spatial_upsampler_path=spatial_upsampler_path,
             gemma_root_path=gemma_root,
             loras=loras,
@@ -71,7 +80,7 @@ class ICLoraPipeline:
         self.stage_2_model_ledger = ModelLedger(
             dtype=self.dtype,
             device=device,
-            checkpoint_path=checkpoint_path,
+            checkpoint_path=distilled_checkpoint_path,
             spatial_upsampler_path=spatial_upsampler_path,
             gemma_root_path=gemma_root,
             loras=[],
@@ -107,29 +116,33 @@ class ICLoraPipeline:
         width: int,
         num_frames: int,
         frame_rate: float,
-        images: list[tuple[str, int, float]],
+        images: list[ImageConditioningInput],
         video_conditioning: list[tuple[str, float]],
         enhance_prompt: bool = False,
         tiling_config: TilingConfig | None = None,
-    ) -> tuple[Iterator[torch.Tensor], torch.Tensor]:
+        conditioning_attention_strength: float = 1.0,
+        skip_stage_2: bool = False,
+        conditioning_attention_mask: torch.Tensor | None = None,
+    ) -> tuple[Iterator[torch.Tensor], Audio]:
         assert_resolution(height=height, width=width, is_two_stage=True)
 
+        if not (0.0 <= conditioning_attention_strength <= 1.0):
+            raise ValueError(
+                f"conditioning_attention_strength must be in [0.0, 1.0], got {conditioning_attention_strength}"
+            )
         generator = torch.Generator(device=self.device).manual_seed(seed)
         noiser = GaussianNoiser(generator=generator)
         stepper = EulerDiffusionStep()
         dtype = torch.bfloat16
 
-        text_encoder = self.stage_1_model_ledger.text_encoder()
-
-        if enhance_prompt:
-            prompt = generate_enhanced_prompt(
-                text_encoder, prompt, images[0][0] if len(images) > 0 else None, seed=seed
-            )
-        video_context, audio_context = encode_text(text_encoder, prompts=[prompt])[0]
-
-        torch.cuda.synchronize()
-        del text_encoder
-        cleanup_memory()
+        (context_p,) = encode_prompts(
+            [prompt],
+            self.stage_1_model_ledger,
+            enhance_first_prompt=enhance_prompt,
+            enhance_prompt_image=images[0][0] if len(images) > 0 else None,
+            enhance_prompt_seed=seed,
+        )
+        video_context, audio_context = context_p.video_encoding, context_p.audio_encoding
 
         # Stage 1: Initial low resolution video generation.
         video_encoder = self.stage_1_model_ledger.video_encoder()
@@ -165,6 +178,8 @@ class ICLoraPipeline:
             width=stage_1_output_shape.width,
             video_encoder=video_encoder,
             num_frames=num_frames,
+            conditioning_attention_strength=conditioning_attention_strength,
+            conditioning_attention_mask=conditioning_attention_mask,
         )
         video_state, audio_state = denoise_audio_video(
             output_shape=stage_1_output_shape,
@@ -181,6 +196,19 @@ class ICLoraPipeline:
         torch.cuda.synchronize()
         del transformer
         cleanup_memory()
+
+        if skip_stage_2:
+            # Skip Stage 2: Decode directly from Stage 1 output at half resolution
+            logging.info("[IC-LoRA] Skipping Stage 2 (--skip-stage-2 enabled)")
+            decoded_video = vae_decode_video(
+                video_state.latent, self.stage_1_model_ledger.video_decoder(), tiling_config, generator
+            )
+            decoded_audio = vae_decode_audio(
+                audio_state.latent, self.stage_1_model_ledger.audio_decoder(), self.stage_1_model_ledger.vocoder()
+            )
+            del video_encoder
+            cleanup_memory()
+            return decoded_video, decoded_audio
 
         # Stage 2: Upsample and refine the video at higher resolution with distilled LORA.
         upscaled_video_latent = upsample_video(
@@ -211,7 +239,7 @@ class ICLoraPipeline:
             )
 
         stage_2_output_shape = VideoPixelShape(batch=1, frames=num_frames, width=width, height=height, fps=frame_rate)
-        stage_2_conditionings = image_conditionings_by_replacing_latent(
+        stage_2_conditionings = combined_image_conditionings(
             images=images,
             height=stage_2_output_shape.height,
             width=stage_2_output_shape.width,
@@ -248,14 +276,16 @@ class ICLoraPipeline:
 
     def _create_conditionings(
         self,
-        images: list[tuple[str, int, float]],
+        images: list[ImageConditioningInput],
         video_conditioning: list[tuple[str, float]],
         height: int,
         width: int,
         num_frames: int,
         video_encoder: VideoEncoder,
+        conditioning_attention_strength: float = 1.0,
+        conditioning_attention_mask: torch.Tensor | None = None,
     ) -> list[ConditioningItem]:
-        conditionings = image_conditionings_by_replacing_latent(
+        conditionings = combined_image_conditionings(
             images=images,
             height=height,
             width=width,
@@ -308,11 +338,23 @@ def main() -> None:
         required=True,
     )
     args = parser.parse_args()
+    # Load mask video if provided via --conditioning-attention-mask
+    conditioning_attention_mask = None
+    conditioning_attention_strength = 1.0
+    if args.conditioning_attention_mask is not None:
+        mask_path, mask_strength = args.conditioning_attention_mask
+        conditioning_attention_strength = mask_strength
+        conditioning_attention_mask = _load_mask_video(
+            mask_path=mask_path,
+            height=args.height // 2,  # Stage 1 operates at half resolution
+            width=args.width // 2,
+            num_frames=args.num_frames,
+        )
     pipeline = ICLoraPipeline(
-        checkpoint_path=args.checkpoint_path,
+        distilled_checkpoint_path=args.distilled_checkpoint_path,
         spatial_upsampler_path=args.spatial_upsampler_path,
         gemma_root=args.gemma_root,
-        loras=args.lora,
+        loras=tuple(args.lora) if args.lora else (),
         quantization=args.quantization,
     )
     tiling_config = TilingConfig.default()
@@ -327,16 +369,51 @@ def main() -> None:
         images=args.images,
         video_conditioning=args.video_conditioning,
         tiling_config=tiling_config,
+        conditioning_attention_strength=conditioning_attention_strength,
+        skip_stage_2=args.skip_stage_2,
+        conditioning_attention_mask=conditioning_attention_mask,
     )
 
     encode_video(
         video=video,
         fps=args.frame_rate,
         audio=audio,
-        audio_sample_rate=AUDIO_SAMPLE_RATE,
         output_path=args.output_path,
         video_chunks_number=video_chunks_number,
     )
+
+
+def _load_mask_video(
+    mask_path: str,
+    height: int,
+    width: int,
+    num_frames: int,
+) -> torch.Tensor:
+    """Load a mask video and return a pixel-space tensor of shape (1, 1, F, H, W).
+    The mask video is loaded, resized to (height, width), converted to
+    grayscale, and normalised to [0, 1].
+    Args:
+        mask_path: Path to the mask video file.
+        height: Target height in pixels.
+        width: Target width in pixels.
+        num_frames: Maximum number of frames to load.
+    Returns:
+        Tensor of shape ``(1, 1, F, H, W)`` with values in ``[0, 1]``.
+    """
+    mask_video = load_video_conditioning(
+        video_path=mask_path,
+        height=height,
+        width=width,
+        frame_cap=num_frames,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    # mask_video shape: (1, C, F, H, W) — take mean over channels for grayscale
+    mask = mask_video.mean(dim=1, keepdim=True)  # (1, 1, F, H, W)
+    # Normalise to [0, 1] — load_video_conditioning applies normalize_latent,
+    # so undo that: values are in [-1, 1], remap to [0, 1]
+    mask = (mask + 1.0) / 2.0
+    return mask.clamp(0.0, 1.0)
 
 
 def _read_lora_reference_downscale_factor(lora_path: str) -> int:

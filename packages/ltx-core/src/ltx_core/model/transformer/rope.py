@@ -39,7 +39,7 @@ def apply_interleaved_rotary_emb(
     return out
 
 
-def apply_split_rotary_emb(
+def apply_split_rotary_emb_(
     input_tensor: torch.Tensor,
     cos_freqs: torch.Tensor,
     sin_freqs: torch.Tensor
@@ -70,7 +70,7 @@ def apply_split_rotary_emb(
     return output
 
 
-def apply_split_rotary_emb_(
+def apply_split_rotary_emb(
     input_tensor: torch.Tensor, cos_freqs: torch.Tensor, sin_freqs: torch.Tensor
 ) -> torch.Tensor:
     needs_reshape = False
