@@ -145,11 +145,12 @@ class TI2VidTwoStagesPipeline:
         # If cache miss or load failed
         if context_p is None:
             print("Disk cache miss. Running text encoder.")
-            (context_p, context_n) = encode_prompts(
-                [prompt],
+            context_p, context_n = encode_prompts(
+                [prompt, negative_prompt],
                 self.stage_1_model_ledger,
                 enhance_first_prompt=enhance_prompt,
                 enhance_prompt_image=images[0][0] if len(images) > 0 else None,
+                enhance_prompt_seed=seed,
             )
 
             # Save to disk for next time

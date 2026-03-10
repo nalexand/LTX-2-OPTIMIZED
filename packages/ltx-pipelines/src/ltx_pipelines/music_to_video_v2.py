@@ -216,11 +216,12 @@ class MusicToVideoTwoStagesPipeline:
 
         if context_p is None:
             print("Disk cache miss. Running text encoder.")
-            (context_p, context_n) = encode_prompts(
-                [prompt],
+            context_p, context_n = encode_prompts(
+                [prompt, negative_prompt],
                 self.stage_1_model_ledger,
                 enhance_first_prompt=enhance_prompt,
                 enhance_prompt_image=images[0][0] if len(images) > 0 else None,
+                enhance_prompt_seed=seed,
             )
 
             print(f"Saving embeddings to {cache_path}")
@@ -464,7 +465,7 @@ def main() -> None:
     args = parser.parse_args()
     
     pipeline = MusicToVideoTwoStagesPipeline(
-        checkpoint_path=args.distilled_checkpoint_path,
+        checkpoint_path=args.checkpoint_path,
         stage_2_checkpoint_path=args.stage_2_checkpoint_path,
         spatial_upsampler_path=args.spatial_upsampler_path,
         gemma_root=args.gemma_root,

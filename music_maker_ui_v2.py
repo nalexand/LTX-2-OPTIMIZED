@@ -10,10 +10,12 @@ from collections import deque
 import cv2
 
 # --- Configuration & Defaults ---
-DEFAULT_CHECKPOINT = "./models/ltx-2-19b-dev-fp8.safetensors"
-DEFAULT_CHECKPOINT_STAGE_2 = "./models/ltx-2-19b-distilled-fp8.safetensors"
+DEFAULT_CHECKPOINT = "./models/ltx-2.3-22b-dev-fp8.safetensors"
+#DEFAULT_CHECKPOINT_STAGE_2 = "./models/ltx-2-19b-distilled-fp8.safetensors"
+DEFAULT_CHECKPOINT_STAGE_2 = "./models/ltx-2.3-22b-distilled-fp8.safetensors"
 DEFAULT_GEMMA = "./models/gemma3"
-DEFAULT_UPSAMPLER = "./models/ltx-2-spatial-upscaler-x2-1.0.safetensors"
+#DEFAULT_UPSAMPLER = "./models/ltx-2-spatial-upscaler-x2-1.0.safetensors"
+DEFAULT_UPSAMPLER = "./models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
 AUDIO_CLIPS_DIR = "./audio_clips"
 
 # --- Global State ---
