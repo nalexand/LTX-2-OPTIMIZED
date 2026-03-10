@@ -55,6 +55,7 @@ def load_audio_input(audio_path: str, target_sample_rate: int, device: torch.dev
     
     return waveform.to(device)
 
+from line_profiler import profile
 
 class MusicToVideoPipeline:
     """
@@ -127,6 +128,7 @@ class MusicToVideoPipeline:
         return encoded_latents
 
     @torch.inference_mode()
+    @profile
     def __call__(
             self,
             prompt: str,
@@ -142,7 +144,7 @@ class MusicToVideoPipeline:
             output_path: str = '',
             video_chunks_number: int = 0,
             fps: int = 0,
-            save_step_1_preview: bool = False,
+            save_step_1_preview: bool = True,
     ) -> tuple[Iterator[torch.Tensor], torch.Tensor | None]:
         print("Preparing Inference (Music to Video)")
         startAt = time.time()
@@ -346,9 +348,7 @@ class MusicToVideoPipeline:
             decoded_audio = None
             if audio_latents is not None:
                 vocoder = self.model_ledger.vocoder()
-                decoded_audio = vae_decode_audio(
-                    audio_state.latent, self.model_ledger.audio_decoder(), vocoder
-                )
+                decoded_audio = vae_decode_audio(audio_state.latent, self.model_ledger.audio_decoder(), vocoder)
                 torch.cuda.synchronize()
                 del vocoder
                 cleanup_memory()
@@ -356,7 +356,7 @@ class MusicToVideoPipeline:
             encode_video(
                 video=decoded_video,
                 fps=fps,
-                audio=audio_waveform.cpu() if audio_waveform is not None else decoded_audio,
+                audio=Audio(waveform=audio_waveform.cpu(), sampling_rate=AUDIO_SAMPLE_RATE) if audio_waveform is not None else decoded_audio,
                 output_path=output_path.replace('.mp4', '_.mp4'),
                 video_chunks_number=video_chunks_number,
             )
@@ -434,7 +434,8 @@ class MusicToVideoPipeline:
                  pass
         
         print("Stage 3: Done.", time.time() - startAt)
-        return decoded_video, audio_waveform.cpu() if audio_waveform is not None else audio
+        final_audio = Audio(waveform=audio_waveform.cpu(), sampling_rate=AUDIO_SAMPLE_RATE) if audio_waveform is not None else audio
+        return decoded_video, final_audio
 
 
 @torch.inference_mode()
