@@ -352,8 +352,8 @@ textarea { font-family: monospace; }
 #status_box { font-weight: bold; color: #475569; }
 """
 
-with gr.Blocks(title="LTX-2 Studio + Queue", theme=theme, css=css) as demo:
-    gr.Markdown("## 🎬 LTX-2 Distilled Web Interface (Queue Enabled)")
+with gr.Blocks(title="LTX-2.3 Studio + Queue", theme=theme, css=css) as demo:
+    gr.Markdown("## 🎬 LTX-2.3 Distilled Web Interface (Queue Enabled)")
 
     with gr.Row():
         # Left Column: Controls
